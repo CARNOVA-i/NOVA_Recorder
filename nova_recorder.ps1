@@ -22,13 +22,16 @@ Add-Type -AssemblyName System.Drawing
 # Native audio engine
 # =====================================================================
 
-Add-Type -TypeDefinition @"
+$novaSource = @"
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Windows.Forms;
 
 
 public class NovaAudioDevice
@@ -43,6 +46,694 @@ public class NovaAudioDevice
     }
 }
 
+public class CyberHeadMeter : Control
+{
+    private int level = 0;
+    private bool clipping = false;
+
+    public int Level
+    {
+        get { return level; }
+
+        set
+        {
+            int newValue = value;
+
+            if (newValue < 0)
+                newValue = 0;
+
+            if (newValue > 100)
+                newValue = 100;
+
+            level = newValue;
+
+            Invalidate();
+        }
+    }
+
+
+    public bool Clipping
+    {
+        get { return clipping; }
+
+        set
+        {
+            clipping = value;
+
+            Invalidate();
+        }
+    }
+
+
+    public CyberHeadMeter()
+    {
+        SetStyle(
+            ControlStyles.AllPaintingInWmPaint |
+            ControlStyles.UserPaint |
+            ControlStyles.OptimizedDoubleBuffer |
+            ControlStyles.ResizeRedraw,
+            true
+        );
+
+        BackColor =
+            Color.FromArgb(
+                28,
+                30,
+                34
+            );
+    }
+
+
+    protected override void OnPaint(
+        PaintEventArgs e
+    )
+    {
+        base.OnPaint(e);
+
+        Graphics g = e.Graphics;
+
+        g.SmoothingMode =
+            SmoothingMode.AntiAlias;
+
+        g.Clear(BackColor);
+
+
+        RectangleF bounds =
+            new RectangleF(
+                8,
+                14,
+                Width - 16,
+                Height - 32
+            );
+
+
+        using (
+            GraphicsPath head =
+                CreateHeadPath(bounds)
+        )
+        {
+            // ---------------------------------------------------------
+            // Dark interior
+            // ---------------------------------------------------------
+
+            using (
+                SolidBrush interior =
+                    new SolidBrush(
+                        Color.FromArgb(
+                            20,
+                            21,
+                            27
+                        )
+                    )
+            )
+            {
+                g.FillPath(
+                    interior,
+                    head
+                );
+            }
+
+
+            // ---------------------------------------------------------
+            // Bottom-up purple audio fill
+            // ---------------------------------------------------------
+
+            float normalized =
+                level / 100f;
+
+            float fillHeight =
+                bounds.Height *
+                normalized;
+
+            RectangleF fillRectangle =
+                new RectangleF(
+                    bounds.Left,
+                    bounds.Bottom - fillHeight,
+                    bounds.Width,
+                    fillHeight
+                );
+
+
+            GraphicsState state =
+                g.Save();
+
+            g.SetClip(
+                head
+            );
+
+
+            if (fillHeight > 0)
+            {
+                using (
+                    LinearGradientBrush fill =
+                        new LinearGradientBrush(
+                            fillRectangle,
+                            Color.FromArgb(
+                                120,
+                                48,
+                                0,
+                                150
+                            ),
+                            Color.FromArgb(
+                                235,
+                                200,
+                                80,
+                                255
+                            ),
+                            LinearGradientMode.Vertical
+                        )
+                )
+                {
+                    g.FillRectangle(
+                        fill,
+                        fillRectangle
+                    );
+                }
+
+
+                // Bright surface line at current audio level.
+
+                using (
+                    Pen surface =
+                        new Pen(
+                            Color.FromArgb(
+                                230,
+                                220,
+                                145,
+                                255
+                            ),
+                            2f
+                        )
+                )
+                {
+                    float y =
+                        bounds.Bottom -
+                        fillHeight;
+
+                    g.DrawLine(
+                        surface,
+                        bounds.Left,
+                        y,
+                        bounds.Right,
+                        y
+                    );
+                }
+            }
+
+
+            g.Restore(
+                state
+            );
+
+
+            // ---------------------------------------------------------
+            // Cyberpunk internal details
+            // ---------------------------------------------------------
+
+            using (
+                Pen detail =
+                    new Pen(
+                        Color.FromArgb(
+                            110,
+                            175,
+                            95,
+                            230
+                        ),
+                        1.2f
+                    )
+            )
+            {
+                detail.DashStyle =
+                    DashStyle.Dot;
+
+
+                float centerX =
+                    bounds.Left +
+                    bounds.Width * 0.5f;
+
+
+                g.DrawLine(
+                    detail,
+                    centerX,
+                    bounds.Top + bounds.Height * 0.20f,
+                    centerX,
+                    bounds.Top + bounds.Height * 0.72f
+                );
+
+
+                g.DrawLine(
+                    detail,
+                    bounds.Left + bounds.Width * 0.26f,
+                    bounds.Top + bounds.Height * 0.44f,
+                    bounds.Right - bounds.Width * 0.26f,
+                    bounds.Top + bounds.Height * 0.44f
+                );
+
+
+                g.DrawLine(
+                    detail,
+                    bounds.Left + bounds.Width * 0.31f,
+                    bounds.Top + bounds.Height * 0.58f,
+                    bounds.Right - bounds.Width * 0.31f,
+                    bounds.Top + bounds.Height * 0.58f
+                );
+            }
+
+
+            // ---------------------------------------------------------
+            // Main neon outline
+            // ---------------------------------------------------------
+
+            Color outlineColor =
+                clipping
+                ? Color.FromArgb(
+                    255,
+                    245,
+                    65,
+                    90
+                )
+                : Color.FromArgb(
+                    235,
+                    190,
+                    105,
+                    255
+                );
+
+
+            // Soft outer glow.
+
+            using (
+                Pen glow =
+                    new Pen(
+                        Color.FromArgb(
+                            65,
+                            outlineColor
+                        ),
+                        7f
+                    )
+            )
+            {
+                g.DrawPath(
+                    glow,
+                    head
+                );
+            }
+
+
+            using (
+                Pen outline =
+                    new Pen(
+                        outlineColor,
+                        2.2f
+                    )
+            )
+            {
+                g.DrawPath(
+                    outline,
+                    head
+                );
+            }
+
+
+           // ---------------------------------------------------------
+            // Integrated cyber visor
+            // ---------------------------------------------------------
+
+            Color visorColor =
+                clipping
+                ? Color.FromArgb(
+                    255,
+                    255,
+                    90,
+                    105
+                )
+                : Color.FromArgb(
+                    255,
+                    225,
+                    155,
+                    255
+                );
+
+            using (
+                Pen visorGlow =
+                    new Pen(
+                        Color.FromArgb(
+                            70,
+                            visorColor
+                        ),
+                        6f
+                    )
+            )
+            {
+                float y =
+                    bounds.Top +
+                    bounds.Height * 0.37f;
+
+                float left =
+                    bounds.Left +
+                    bounds.Width * 0.22f;
+
+                float right =
+                    bounds.Right -
+                    bounds.Width * 0.22f;
+
+                float center =
+                    bounds.Left +
+                    bounds.Width * 0.5f;
+
+                g.DrawLine(
+                    visorGlow,
+                    left,
+                    y,
+                    center - bounds.Width * 0.06f,
+                    y + 4
+                );
+
+                g.DrawLine(
+                    visorGlow,
+                    center - bounds.Width * 0.06f,
+                    y + 4,
+                    center,
+                    y + 1
+                );
+
+                g.DrawLine(
+                    visorGlow,
+                    center,
+                    y + 1,
+                    center + bounds.Width * 0.06f,
+                    y + 4
+                );
+
+                g.DrawLine(
+                    visorGlow,
+                    center + bounds.Width * 0.06f,
+                    y + 4,
+                    right,
+                    y
+                );
+            }
+
+
+            using (
+                Pen visor =
+                    new Pen(
+                        visorColor,
+                        2.4f
+                    )
+            )
+            {
+                float y =
+                    bounds.Top +
+                    bounds.Height * 0.37f;
+
+                float left =
+                    bounds.Left +
+                    bounds.Width * 0.22f;
+
+                float right =
+                    bounds.Right -
+                    bounds.Width * 0.22f;
+
+                float center =
+                    bounds.Left +
+                    bounds.Width * 0.5f;
+
+                g.DrawLine(
+                    visor,
+                    left,
+                    y,
+                    center - bounds.Width * 0.06f,
+                    y + 4
+                );
+
+                g.DrawLine(
+                    visor,
+                    center - bounds.Width * 0.06f,
+                    y + 4,
+                    center,
+                    y + 1
+                );
+
+                g.DrawLine(
+                    visor,
+                    center,
+                    y + 1,
+                    center + bounds.Width * 0.06f,
+                    y + 4
+                );
+
+                g.DrawLine(
+                    visor,
+                    center + bounds.Width * 0.06f,
+                    y + 4,
+                    right,
+                    y
+                );
+            }
+        }
+    }
+
+
+    private GraphicsPath CreateHeadPath(
+        RectangleF r
+    )
+    {
+        GraphicsPath path =
+            new GraphicsPath();
+
+        float cx =
+            r.Left +
+            r.Width * 0.5f;
+
+        float top =
+            r.Top;
+
+        float bottom =
+            r.Bottom;
+
+
+        path.StartFigure();
+
+
+        // -------------------------------------------------------------
+        // Crown / upper-left forehead
+        // -------------------------------------------------------------
+
+        path.AddLine(
+            cx,
+            top,
+            r.Left + r.Width * 0.34f,
+            r.Top + r.Height * 0.025f
+        );
+
+
+        path.AddBezier(
+            r.Left + r.Width * 0.34f,
+            r.Top + r.Height * 0.025f,
+
+            r.Left + r.Width * 0.23f,
+            r.Top + r.Height * 0.045f,
+
+            r.Left + r.Width * 0.17f,
+            r.Top + r.Height * 0.13f,
+
+            r.Left + r.Width * 0.15f,
+            r.Top + r.Height * 0.22f
+        );
+
+
+        // -------------------------------------------------------------
+        // Left temple armor
+        // -------------------------------------------------------------
+
+        path.AddLine(
+            r.Left + r.Width * 0.15f,
+            r.Top + r.Height * 0.22f,
+
+            r.Left + r.Width * 0.11f,
+            r.Top + r.Height * 0.34f
+        );
+
+
+        path.AddLine(
+            r.Left + r.Width * 0.11f,
+            r.Top + r.Height * 0.34f,
+
+            r.Left + r.Width * 0.15f,
+            r.Top + r.Height * 0.47f
+        );
+
+
+        // -------------------------------------------------------------
+        // Left cheekbone
+        // -------------------------------------------------------------
+
+        path.AddLine(
+            r.Left + r.Width * 0.15f,
+            r.Top + r.Height * 0.47f,
+
+            r.Left + r.Width * 0.22f,
+            r.Top + r.Height * 0.57f
+        );
+
+
+        path.AddLine(
+            r.Left + r.Width * 0.22f,
+            r.Top + r.Height * 0.57f,
+
+            r.Left + r.Width * 0.27f,
+            r.Top + r.Height * 0.68f
+        );
+
+
+        // -------------------------------------------------------------
+        // Left jaw
+        // -------------------------------------------------------------
+
+        path.AddLine(
+            r.Left + r.Width * 0.27f,
+            r.Top + r.Height * 0.68f,
+
+            r.Left + r.Width * 0.32f,
+            r.Top + r.Height * 0.76f
+        );
+
+        path.AddLine(
+            r.Left + r.Width * 0.32f,
+            r.Top + r.Height * 0.76f,
+
+            r.Left + r.Width * 0.39f,
+            r.Top + r.Height * 0.86f
+        );
+
+
+        // -------------------------------------------------------------
+        // Mechanical chin
+        // -------------------------------------------------------------
+
+        path.AddLine(
+            r.Left + r.Width * 0.39f,
+            r.Top + r.Height * 0.86f,
+
+            r.Left + r.Width * 0.40f,
+            r.Top + r.Height * 0.91f
+        );
+
+        path.AddLine(
+            r.Left + r.Width * 0.40f,
+            r.Top + r.Height * 0.91f,
+
+            r.Right - r.Width * 0.40f,
+            r.Top + r.Height * 0.91f
+        );
+
+        path.AddLine(
+            r.Right - r.Width * 0.40f,
+            r.Top + r.Height * 0.91f,
+
+            r.Right - r.Width * 0.39f,
+            r.Top + r.Height * 0.86f
+        );
+
+
+        // -------------------------------------------------------------
+        // Right jaw
+        // -------------------------------------------------------------
+
+        path.AddLine(
+            r.Right - r.Width * 0.39f,
+            r.Top + r.Height * 0.86f,
+
+            r.Right - r.Width * 0.32f,
+            r.Top + r.Height * 0.76f
+        );
+
+        path.AddLine(
+            r.Right - r.Width * 0.32f,
+            r.Top + r.Height * 0.76f,
+
+            r.Right - r.Width * 0.27f,
+            r.Top + r.Height * 0.68f
+        );
+
+        // -------------------------------------------------------------
+        // Right cheekbone
+        // -------------------------------------------------------------
+
+        path.AddLine(
+            r.Right - r.Width * 0.27f,
+            r.Top + r.Height * 0.68f,
+
+            r.Right - r.Width * 0.22f,
+            r.Top + r.Height * 0.57f
+        );
+
+
+        path.AddLine(
+            r.Right - r.Width * 0.22f,
+            r.Top + r.Height * 0.57f,
+
+            r.Right - r.Width * 0.15f,
+            r.Top + r.Height * 0.47f
+        );
+
+
+        // -------------------------------------------------------------
+        // Right temple armor
+        // -------------------------------------------------------------
+
+        path.AddLine(
+            r.Right - r.Width * 0.15f,
+            r.Top + r.Height * 0.47f,
+
+            r.Right - r.Width * 0.11f,
+            r.Top + r.Height * 0.34f
+        );
+
+
+        path.AddLine(
+            r.Right - r.Width * 0.11f,
+            r.Top + r.Height * 0.34f,
+
+            r.Right - r.Width * 0.15f,
+            r.Top + r.Height * 0.22f
+        );
+
+
+        // -------------------------------------------------------------
+        // Upper-right forehead / crown
+        // -------------------------------------------------------------
+
+        path.AddBezier(
+            r.Right - r.Width * 0.15f,
+            r.Top + r.Height * 0.22f,
+
+            r.Right - r.Width * 0.17f,
+            r.Top + r.Height * 0.13f,
+
+            r.Right - r.Width * 0.23f,
+            r.Top + r.Height * 0.045f,
+
+            r.Right - r.Width * 0.34f,
+            r.Top + r.Height * 0.025f
+        );
+
+
+        path.AddLine(
+            r.Right - r.Width * 0.34f,
+            r.Top + r.Height * 0.025f,
+
+            cx,
+            top
+        );
+
+
+        path.CloseFigure();
+
+        return path;
+    }
+}
 
 public class NovaWaveRecorder : IDisposable
 {
@@ -227,6 +918,8 @@ public class NovaWaveRecorder : IDisposable
 
     private volatile bool recording = false;
 
+    private volatile bool previewing = false;
+
     private int currentPeak = 0;
 
     private int clippingFlag = 0;
@@ -244,7 +937,7 @@ public class NovaWaveRecorder : IDisposable
     private double gainDb = 16.0;
 
     private double gainMultiplier =
-        Math.Pow(10.0, 6.0 / 20.0);
+        Math.Pow(10.0, 16.0 / 20.0);
 
 
     // -----------------------------------------------------------------
@@ -256,6 +949,10 @@ public class NovaWaveRecorder : IDisposable
         get { return recording; }
     }
 
+    public bool IsPreviewing
+    {
+        get { return previewing; }
+    }
 
     public int SampleRate
     {
@@ -443,6 +1140,167 @@ public class NovaWaveRecorder : IDisposable
     }
 
 
+
+    private void OpenCapture(int deviceId)
+    {
+        callbackDelegate = new WaveInCallback(AudioCallback);
+
+        currentPeak = 0;
+
+        Interlocked.Exchange(
+            ref clippingFlag,
+            0
+        );
+
+        int[,] formats =
+        {
+            { 48000, 1 },
+            { 44100, 1 },
+            { 48000, 2 },
+            { 44100, 2 }
+        };
+
+        int lastError = -1;
+        bool opened = false;
+
+        for (
+            int i = 0;
+            i < formats.GetLength(0);
+            i++
+        )
+        {
+            int tryRate =
+                formats[i, 0];
+
+            int tryChannels =
+                formats[i, 1];
+
+            WAVEFORMATEX format =
+                CreateFormat(
+                    tryRate,
+                    tryChannels
+                );
+
+            IntPtr handle;
+
+            int result =
+                waveInOpen(
+                    out handle,
+                    (uint)deviceId,
+                    ref format,
+                    callbackDelegate,
+                    IntPtr.Zero,
+                    CALLBACK_FUNCTION
+                );
+
+            if (result == MMSYSERR_NOERROR)
+            {
+                waveHandle =
+                    handle;
+
+                sampleRate =
+                    tryRate;
+
+                channels =
+                    tryChannels;
+
+                opened =
+                    true;
+
+                break;
+            }
+
+            lastError =
+                result;
+        }
+
+        if (!opened)
+        {
+            throw new Exception(
+                "Could not open the selected microphone." +
+                Environment.NewLine +
+                Environment.NewLine +
+                "Windows audio error " +
+                lastError +
+                ": " +
+                GetErrorText(lastError)
+            );
+        }
+
+        CreateBuffers();
+
+        int startResult =
+            waveInStart(
+                waveHandle
+            );
+
+        ThrowIfError(
+            startResult,
+            "Starting microphone capture"
+        );
+    }
+
+
+
+    public void StartPreview(int deviceId)
+    {
+        if (recording || previewing)
+        {
+            return;
+        }
+
+        writer = null;
+        currentFile = null;
+        dataBytesWritten = 0;
+
+        previewing = true;
+
+        try
+        {
+            OpenCapture(deviceId);
+        }
+        catch
+        {
+            previewing = false;
+
+            CleanupAudio();
+
+            throw;
+        }
+    }
+
+
+    public void StopPreview()
+    {
+        if (!previewing)
+        {
+            return;
+        }
+
+        previewing = false;
+
+        if (waveHandle != IntPtr.Zero)
+        {
+            waveInStop(waveHandle);
+            waveInReset(waveHandle);
+
+            Thread.Sleep(100);
+        }
+
+        lock (sync)
+        {
+            CleanupAudio();
+        }
+
+        currentPeak = 0;
+
+        Interlocked.Exchange(
+            ref clippingFlag,
+            0
+        );
+    }
+
+
     // -----------------------------------------------------------------
     // Start recording
     // -----------------------------------------------------------------
@@ -457,6 +1315,11 @@ public class NovaWaveRecorder : IDisposable
             throw new InvalidOperationException(
                 "The recorder is already running."
             );
+        }
+
+        if (previewing)
+        {
+            StopPreview();
         }
 
         callbackDelegate =
@@ -763,10 +1626,7 @@ public class NovaWaveRecorder : IDisposable
                 );
 
 
-            if (
-                header.dwBytesRecorded > 0 &&
-                writer != null
-            )
+            if (header.dwBytesRecorded > 0)
             {
                 int length =
                     (int)header.dwBytesRecorded;
@@ -784,30 +1644,35 @@ public class NovaWaveRecorder : IDisposable
                 );
 
 
-                // Apply software gain BEFORE writing
-                // the PCM samples to disk.
+                // Always process audio for the live meter.
+                // In preview mode this updates peak/clipping
+                // without writing anything to disk.
                 ApplyGainAndCalculatePeak(
                     audio,
                     length
                 );
 
 
-                writer.Write(
-                    audio,
-                    0,
-                    length
-                );
+                // Only write PCM data during an actual recording.
+                if (writer != null)
+                {
+                    writer.Write(
+                        audio,
+                        0,
+                        length
+                    );
 
 
-                dataBytesWritten +=
-                    length;
+                    dataBytesWritten +=
+                        length;
+                }
             }
 
 
             // Return completed buffer to Windows while capture
             // remains active.
             if (
-                recording &&
+                (recording || previewing) &&
                 waveHandle != IntPtr.Zero
             )
             {
@@ -1353,6 +2218,17 @@ public class NovaWaveRecorder : IDisposable
 "@
 
 
+
+$novaReferences = @(
+    [System.Drawing.Graphics].Assembly.Location
+    [System.Windows.Forms.Form].Assembly.Location
+)
+
+Add-Type `
+    -TypeDefinition $novaSource `
+    -ReferencedAssemblies $novaReferences `
+    -Language CSharp
+
 # =====================================================================
 # Directories
 # =====================================================================
@@ -1396,7 +2272,7 @@ $form = New-Object System.Windows.Forms.Form
 
 $form.Text = "Nova Recorder v2.1"
 
-$form.Size = New-Object System.Drawing.Size(540, 535)
+$form.Size = New-Object System.Drawing.Size(540, 680)
 
 $form.StartPosition = "CenterScreen"
 
@@ -1538,19 +2414,17 @@ $form.Controls.Add($clipLabel)
 # Input level bar
 # =====================================================================
 
-$levelBar = New-Object System.Windows.Forms.ProgressBar
+$headMeter = New-Object CyberHeadMeter
 
-$levelBar.Minimum = 0
+$headMeter.Size = New-Object System.Drawing.Size(180, 180)
 
-$levelBar.Maximum = 100
+$headMeter.Location = New-Object System.Drawing.Point(170, 175)
 
-$levelBar.Value = 0
+$headMeter.Level = 0
 
-$levelBar.Size = New-Object System.Drawing.Size(440, 22)
+$headMeter.Clipping = $false
 
-$levelBar.Location = New-Object System.Drawing.Point(45, 181)
-
-$form.Controls.Add($levelBar)
+$form.Controls.Add($headMeter)
 
 
 # =====================================================================
@@ -1570,7 +2444,7 @@ $gainTitleLabel.Font = New-Object System.Drawing.Font(
 
 $gainTitleLabel.AutoSize = $true
 
-$gainTitleLabel.Location = New-Object System.Drawing.Point(45, 224)
+$gainTitleLabel.Location = New-Object System.Drawing.Point(45, 370)
 
 $form.Controls.Add($gainTitleLabel)
 
@@ -1593,7 +2467,7 @@ $gainValueLabel.Font = New-Object System.Drawing.Font(
 
 $gainValueLabel.AutoSize = $true
 
-$gainValueLabel.Location = New-Object System.Drawing.Point(430, 224)
+$gainValueLabel.Location = New-Object System.Drawing.Point(430, 370)
 
 $form.Controls.Add($gainValueLabel)
 
@@ -1618,7 +2492,7 @@ $gainSlider.LargeChange = 4
 
 $gainSlider.Size = New-Object System.Drawing.Size(390, 38)
 
-$gainSlider.Location = New-Object System.Drawing.Point(40, 236)
+$gainSlider.Location = New-Object System.Drawing.Point(40, 382)
 
 $form.Controls.Add($gainSlider)
 
@@ -1629,7 +2503,7 @@ $gainZeroLabel = New-Object System.Windows.Forms.Label
 $gainZeroLabel.Text = "0"
 $gainZeroLabel.ForeColor = [System.Drawing.Color]::Gray
 $gainZeroLabel.AutoSize = $true
-$gainZeroLabel.Location = New-Object System.Drawing.Point(48, 290)
+$gainZeroLabel.Location = New-Object System.Drawing.Point(48, 435)
 $form.Controls.Add($gainZeroLabel)
 
 
@@ -1637,7 +2511,7 @@ $gainSixLabel = New-Object System.Windows.Forms.Label
 $gainSixLabel.Text = "+8"
 $gainSixLabel.ForeColor = [System.Drawing.Color]::Gray
 $gainSixLabel.AutoSize = $true
-$gainSixLabel.Location = New-Object System.Drawing.Point(139, 290)
+$gainSixLabel.Location = New-Object System.Drawing.Point(139, 435)
 $form.Controls.Add($gainSixLabel)
 
 
@@ -1645,7 +2519,7 @@ $gainTwelveLabel = New-Object System.Windows.Forms.Label
 $gainTwelveLabel.Text = "+16"
 $gainTwelveLabel.ForeColor = [System.Drawing.Color]::Gray
 $gainTwelveLabel.AutoSize = $true
-$gainTwelveLabel.Location = New-Object System.Drawing.Point(230, 290)
+$gainTwelveLabel.Location = New-Object System.Drawing.Point(230, 435)
 $form.Controls.Add($gainTwelveLabel)
 
 
@@ -1653,7 +2527,7 @@ $gainEighteenLabel = New-Object System.Windows.Forms.Label
 $gainEighteenLabel.Text = "+32 dB"
 $gainEighteenLabel.ForeColor = [System.Drawing.Color]::Gray
 $gainEighteenLabel.AutoSize = $true
-$gainEighteenLabel.Location = New-Object System.Drawing.Point(405, 290)
+$gainEighteenLabel.Location = New-Object System.Drawing.Point(318, 435)
 $form.Controls.Add($gainEighteenLabel)
 
 
@@ -1662,12 +2536,12 @@ $gainTwentyFourLabel = New-Object System.Windows.Forms.Label
 $gainTwentyFourLabel.Text = "+24"
 $gainTwentyFourLabel.ForeColor = [System.Drawing.Color]::Gray
 $gainTwentyFourLabel.AutoSize = $true
-$gainTwentyFourLabel.Location = New-Object System.Drawing.Point(318, 290)
+$gainTwentyFourLabel.Location = New-Object System.Drawing.Point(405, 435)
 
 $form.Controls.Add($gainTwentyFourLabel)
 
 
-# Set initial +6 dB gain.
+# Set initial +16 dB gain.
 
 $script:recorder.SetGainDb([double]$gainSlider.Value)
 
@@ -1689,7 +2563,7 @@ $statusLabel.Font = New-Object System.Drawing.Font(
 
 $statusLabel.AutoSize = $true
 
-$statusLabel.Location = New-Object System.Drawing.Point(200, 320)
+$statusLabel.Location = New-Object System.Drawing.Point(200, 465)
 
 $form.Controls.Add($statusLabel)
 
@@ -1712,7 +2586,7 @@ $timerLabel.Font = New-Object System.Drawing.Font(
 
 $timerLabel.AutoSize = $true
 
-$timerLabel.Location = New-Object System.Drawing.Point(185, 350)
+$timerLabel.Location = New-Object System.Drawing.Point(185, 495)
 
 $form.Controls.Add($timerLabel)
 
@@ -1727,7 +2601,7 @@ $recordButton.Text = "RECORD"
 
 $recordButton.Size = New-Object System.Drawing.Size(145, 48)
 
-$recordButton.Location = New-Object System.Drawing.Point(95, 405)
+$recordButton.Location = New-Object System.Drawing.Point(95, 550)
 
 $recordButton.Font = New-Object System.Drawing.Font(
     "Segoe UI",
@@ -1758,7 +2632,7 @@ $stopButton.Text = "STOP"
 
 $stopButton.Size = New-Object System.Drawing.Size(145, 48)
 
-$stopButton.Location = New-Object System.Drawing.Point(285, 405)
+$stopButton.Location = New-Object System.Drawing.Point(285, 550)
 
 $stopButton.Font = New-Object System.Drawing.Font(
     "Segoe UI",
@@ -1791,7 +2665,7 @@ $folderButton.Text = "Open Recordings Folder"
 
 $folderButton.Size = New-Object System.Drawing.Size(205, 30)
 
-$folderButton.Location = New-Object System.Drawing.Point(160, 463)
+$folderButton.Location = New-Object System.Drawing.Point(160, 610)
 
 $form.Controls.Add($folderButton)
 
@@ -1855,6 +2729,52 @@ function Update-DeviceList {
 }
 
 
+function Start-LivePreview {
+
+    if ($script:recording) {
+        return
+    }
+
+    if ($null -eq $deviceCombo.SelectedItem) {
+        return
+    }
+
+    try {
+
+        $script:recorder.SetGainDb(
+            [double]$gainSlider.Value
+        )
+
+        $script:recorder.StartPreview(
+            $deviceCombo.SelectedItem.Id
+        )
+
+        $statusLabel.Text = "LIVE PREVIEW"
+        $statusLabel.ForeColor = [System.Drawing.Color]::MediumPurple
+    }
+    catch {
+
+        $statusLabel.Text = "Preview unavailable"
+        $statusLabel.ForeColor = [System.Drawing.Color]::OrangeRed
+    }
+}
+
+
+function Stop-LivePreview {
+
+    try {
+
+        if ($script:recorder.IsPreviewing) {
+            $script:recorder.StopPreview()
+        }
+    }
+    catch {
+    }
+
+    $headMeter.Level = 0
+    $headMeter.Clipping = $false
+}
+
 # =====================================================================
 # Gain slider change
 # =====================================================================
@@ -1880,7 +2800,7 @@ $uiTimer.Interval = 100
 
 $uiTimer.Add_Tick({
 
-    if ($script:recording) {
+    if ($script:recording -or $script:recorder.IsPreviewing) {
 
         # -------------------------------------------------------------
         # Elapsed time
@@ -1915,26 +2835,30 @@ $uiTimer.Add_Tick({
                 $peak = 100
             }
 
-            $levelBar.Value = $peak
+            $headMeter.Level = $peak
 
 
             if ($script:recorder.GetAndResetClipping()) {
 
-                $clipLabel.ForeColor = [System.Drawing.Color]::Red
+            $clipLabel.ForeColor = [System.Drawing.Color]::Red
+            $headMeter.Clipping = $true
             }
             else {
 
                 $clipLabel.ForeColor = [System.Drawing.Color]::DimGray
+                $headMeter.Clipping = $false
             }
         }
         catch {
 
-            $levelBar.Value = 0
+            $headMeter.Level = 0
+            $headMeter.Clipping = $false
         }
     }
     else {
 
-        $levelBar.Value = 0
+        $headMeter.Level = 0
+        $headMeter.Clipping = $false
 
         $clipLabel.ForeColor = [System.Drawing.Color]::DimGray
     }
@@ -2020,7 +2944,8 @@ $recordButton.Add_Click({
 
     $timerLabel.Text = "00:00:00"
 
-    $levelBar.Value = 0
+    $headMeter.Level = 0
+    $headMeter.Clipping = $false
 
     $clipLabel.ForeColor = [System.Drawing.Color]::DimGray
 
@@ -2074,7 +2999,8 @@ $stopButton.Add_Click({
     $script:recordingStart = $null
 
 
-    $levelBar.Value = 0
+    $headMeter.Level = 0
+    $headMeter.Clipping = $false
 
     $clipLabel.ForeColor = [System.Drawing.Color]::DimGray
 
@@ -2127,12 +3053,14 @@ $stopButton.Add_Click({
             [System.Windows.Forms.MessageBoxIcon]::Information
         )
     }
-    else {
+        else {
 
         $statusLabel.Text = "Recording file not found"
 
         $statusLabel.ForeColor = [System.Drawing.Color]::OrangeRed
     }
+
+    Start-LivePreview
 })
 
 
@@ -2210,5 +3138,9 @@ $form.Add_FormClosing({
 # =====================================================================
 
 Update-DeviceList
+
+$uiTimer.Start()
+
+Start-LivePreview
 
 [void]$form.ShowDialog()
