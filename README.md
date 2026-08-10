@@ -210,3 +210,9 @@ NOVA_Recorder/
 ├── nova_recorder.ps1
 ├── README.md
 └── Recordings/# NOVA_Recorder
+```
+
+
+## License
+
+Nova Recorder is released under the [MIT License](LICENSE).
