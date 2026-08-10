@@ -1,0 +1,10 @@
+# Local audio recordings
+Recordings/
+
+# Temporary PowerShell/editor files
+*.tmp
+*.bak
+
+# Windows junk
+Thumbs.db
+Desktop.ini
