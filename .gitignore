@@ -1,4 +1,4 @@
-# Local audio recordings
+# Local audio/video recordings
 Recordings/
 
 # Temporary PowerShell/editor files
@@ -8,3 +8,13 @@ Recordings/
 # Windows junk
 Thumbs.db
 Desktop.ini
+
+# Local FFmpeg binaries
+Tools/
+
+# Local capture tests
+camera-test*.avi
+camera-test*.mp4
+
+# Local script backup
+nova_recorder_backup.ps1

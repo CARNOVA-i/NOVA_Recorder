@@ -1,8 +1,8 @@
-Add-Type -AssemblyName System.Windows.Forms
+﻿Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 # =====================================================================
-# NOVA RECORDER v2.1
+# NOVA RECORDER v2.2
 #
 # Portable Windows microphone recorder
 #
@@ -14,7 +14,9 @@ Add-Type -AssemblyName System.Drawing
 #   - Clipping indicator
 #   - 16-bit PCM WAV output
 #   - Timestamped recordings
-#   - No external libraries
+#   - Optional 1080p30 MJPEG webcam capture via portable FFmpeg
+#   - Audio and video saved as separate files for this integration stage
+#   - No installed external libraries required
 # =====================================================================
 
 
@@ -496,243 +498,328 @@ public class CyberHeadMeter : Control
 
 
     private GraphicsPath CreateHeadPath(
-        RectangleF r
-    )
-    {
-        GraphicsPath path =
-            new GraphicsPath();
+    RectangleF r
+)
+{
+    GraphicsPath path =
+        new GraphicsPath();
 
-        float cx =
-            r.Left +
-            r.Width * 0.5f;
+    float cx =
+        r.Left +
+        r.Width * 0.5f;
 
-        float top =
-            r.Top;
+    float top =
+        r.Top;
 
-        float bottom =
-            r.Bottom;
+    float bottom =
+        r.Bottom;
 
+    path.StartFigure();
 
-        path.StartFigure();
+    // -------------------------------------------------------------
+    // Top crown / sensor nub
+    // -------------------------------------------------------------
 
+    path.AddLine(
+        cx,
+        top,
 
-        // -------------------------------------------------------------
-        // Crown / upper-left forehead
-        // -------------------------------------------------------------
+        r.Left + r.Width * 0.44f,
+        top
+    );
 
-        path.AddLine(
-            cx,
-            top,
-            r.Left + r.Width * 0.34f,
-            r.Top + r.Height * 0.025f
-        );
+    path.AddLine(
+        r.Left + r.Width * 0.44f,
+        top,
 
+        r.Left + r.Width * 0.44f,
+        r.Top + r.Height * 0.07f
+    );
 
-        path.AddBezier(
-            r.Left + r.Width * 0.34f,
-            r.Top + r.Height * 0.025f,
+    path.AddLine(
+        r.Left + r.Width * 0.44f,
+        r.Top + r.Height * 0.07f,
 
-            r.Left + r.Width * 0.23f,
-            r.Top + r.Height * 0.045f,
+        r.Left + r.Width * 0.35f,
+        r.Top + r.Height * 0.07f
+    );
 
-            r.Left + r.Width * 0.17f,
-            r.Top + r.Height * 0.13f,
+    // -------------------------------------------------------------
+    // Left dome / forehead
+    // -------------------------------------------------------------
 
-            r.Left + r.Width * 0.15f,
-            r.Top + r.Height * 0.22f
-        );
+    path.AddBezier(
+        r.Left + r.Width * 0.35f,
+        r.Top + r.Height * 0.07f,
 
+        r.Left + r.Width * 0.24f,
+        r.Top + r.Height * 0.10f,
 
-        // -------------------------------------------------------------
-        // Left temple armor
-        // -------------------------------------------------------------
+        r.Left + r.Width * 0.18f,
+        r.Top + r.Height * 0.17f,
 
-        path.AddLine(
-            r.Left + r.Width * 0.15f,
-            r.Top + r.Height * 0.22f,
+        r.Left + r.Width * 0.14f,
+        r.Top + r.Height * 0.25f
+    );
 
-            r.Left + r.Width * 0.11f,
-            r.Top + r.Height * 0.34f
-        );
+    // -------------------------------------------------------------
+    // Left temple wall
+    // -------------------------------------------------------------
 
+    path.AddLine(
+        r.Left + r.Width * 0.14f,
+        r.Top + r.Height * 0.25f,
 
-        path.AddLine(
-            r.Left + r.Width * 0.11f,
-            r.Top + r.Height * 0.34f,
+        r.Left + r.Width * 0.14f,
+        r.Top + r.Height * 0.38f
+    );
 
-            r.Left + r.Width * 0.15f,
-            r.Top + r.Height * 0.47f
-        );
+    // -------------------------------------------------------------
+    // Left temple flare
+    // -------------------------------------------------------------
 
+    path.AddLine(
+        r.Left + r.Width * 0.14f,
+        r.Top + r.Height * 0.38f,
 
-        // -------------------------------------------------------------
-        // Left cheekbone
-        // -------------------------------------------------------------
+        r.Left + r.Width * 0.07f,
+        r.Top + r.Height * 0.42f
+    );
 
-        path.AddLine(
-            r.Left + r.Width * 0.15f,
-            r.Top + r.Height * 0.47f,
+    path.AddLine(
+        r.Left + r.Width * 0.07f,
+        r.Top + r.Height * 0.42f,
 
-            r.Left + r.Width * 0.22f,
-            r.Top + r.Height * 0.57f
-        );
+        r.Left + r.Width * 0.14f,
+        r.Top + r.Height * 0.56f
+    );
 
+    // -------------------------------------------------------------
+    // Left lower cheek / side wall
+    // -------------------------------------------------------------
 
-        path.AddLine(
-            r.Left + r.Width * 0.22f,
-            r.Top + r.Height * 0.57f,
+    path.AddLine(
+        r.Left + r.Width * 0.14f,
+        r.Top + r.Height * 0.56f,
 
-            r.Left + r.Width * 0.27f,
-            r.Top + r.Height * 0.68f
-        );
+        r.Left + r.Width * 0.14f,
+        r.Top + r.Height * 0.67f
+    );
 
+    // -------------------------------------------------------------
+    // Left cheek pod
+    // -------------------------------------------------------------
 
-        // -------------------------------------------------------------
-        // Left jaw
-        // -------------------------------------------------------------
+    path.AddBezier(
+        r.Left + r.Width * 0.14f,
+        r.Top + r.Height * 0.67f,
 
-        path.AddLine(
-            r.Left + r.Width * 0.27f,
-            r.Top + r.Height * 0.68f,
+        r.Left + r.Width * 0.09f,
+        r.Top + r.Height * 0.75f,
 
-            r.Left + r.Width * 0.32f,
-            r.Top + r.Height * 0.76f
-        );
+        r.Left + r.Width * 0.10f,
+        r.Top + r.Height * 0.88f,
 
-        path.AddLine(
-            r.Left + r.Width * 0.32f,
-            r.Top + r.Height * 0.76f,
+        r.Left + r.Width * 0.22f,
+        r.Top + r.Height * 0.88f
+    );
 
-            r.Left + r.Width * 0.39f,
-            r.Top + r.Height * 0.86f
-        );
+    path.AddBezier(
+        r.Left + r.Width * 0.22f,
+        r.Top + r.Height * 0.88f,
 
+        r.Left + r.Width * 0.28f,
+        r.Top + r.Height * 0.88f,
 
-        // -------------------------------------------------------------
-        // Mechanical chin
-        // -------------------------------------------------------------
+        r.Left + r.Width * 0.31f,
+        r.Top + r.Height * 0.82f,
 
-        path.AddLine(
-            r.Left + r.Width * 0.39f,
-            r.Top + r.Height * 0.86f,
+        r.Left + r.Width * 0.34f,
+        r.Top + r.Height * 0.79f
+    );
 
-            r.Left + r.Width * 0.40f,
-            r.Top + r.Height * 0.91f
-        );
+    // -------------------------------------------------------------
+    // Left jaw / chin approach
+    // -------------------------------------------------------------
 
-        path.AddLine(
-            r.Left + r.Width * 0.40f,
-            r.Top + r.Height * 0.91f,
+    path.AddLine(
+        r.Left + r.Width * 0.34f,
+        r.Top + r.Height * 0.79f,
 
-            r.Right - r.Width * 0.40f,
-            r.Top + r.Height * 0.91f
-        );
+        r.Left + r.Width * 0.39f,
+        r.Top + r.Height * 0.90f
+    );
 
-        path.AddLine(
-            r.Right - r.Width * 0.40f,
-            r.Top + r.Height * 0.91f,
+    path.AddLine(
+        r.Left + r.Width * 0.39f,
+        r.Top + r.Height * 0.90f,
 
-            r.Right - r.Width * 0.39f,
-            r.Top + r.Height * 0.86f
-        );
+        r.Left + r.Width * 0.46f,
+        r.Top + r.Height * 0.94f
+    );
 
+    // -------------------------------------------------------------
+    // Center chin point
+    // -------------------------------------------------------------
 
-        // -------------------------------------------------------------
-        // Right jaw
-        // -------------------------------------------------------------
+    path.AddLine(
+        r.Left + r.Width * 0.46f,
+        r.Top + r.Height * 0.94f,
 
-        path.AddLine(
-            r.Right - r.Width * 0.39f,
-            r.Top + r.Height * 0.86f,
+        cx,
+        bottom
+    );
 
-            r.Right - r.Width * 0.32f,
-            r.Top + r.Height * 0.76f
-        );
+    path.AddLine(
+        cx,
+        bottom,
 
-        path.AddLine(
-            r.Right - r.Width * 0.32f,
-            r.Top + r.Height * 0.76f,
+        r.Right - r.Width * 0.46f,
+        r.Top + r.Height * 0.94f
+    );
 
-            r.Right - r.Width * 0.27f,
-            r.Top + r.Height * 0.68f
-        );
+    // -------------------------------------------------------------
+    // Right jaw / chin approach
+    // -------------------------------------------------------------
 
-        // -------------------------------------------------------------
-        // Right cheekbone
-        // -------------------------------------------------------------
+    path.AddLine(
+        r.Right - r.Width * 0.46f,
+        r.Top + r.Height * 0.94f,
 
-        path.AddLine(
-            r.Right - r.Width * 0.27f,
-            r.Top + r.Height * 0.68f,
+        r.Right - r.Width * 0.39f,
+        r.Top + r.Height * 0.90f
+    );
 
-            r.Right - r.Width * 0.22f,
-            r.Top + r.Height * 0.57f
-        );
+    path.AddLine(
+        r.Right - r.Width * 0.39f,
+        r.Top + r.Height * 0.90f,
 
+        r.Right - r.Width * 0.34f,
+        r.Top + r.Height * 0.79f
+    );
 
-        path.AddLine(
-            r.Right - r.Width * 0.22f,
-            r.Top + r.Height * 0.57f,
+    // -------------------------------------------------------------
+    // Right cheek pod
+    // -------------------------------------------------------------
 
-            r.Right - r.Width * 0.15f,
-            r.Top + r.Height * 0.47f
-        );
+    path.AddBezier(
+        r.Right - r.Width * 0.34f,
+        r.Top + r.Height * 0.79f,
 
+        r.Right - r.Width * 0.31f,
+        r.Top + r.Height * 0.82f,
 
-        // -------------------------------------------------------------
-        // Right temple armor
-        // -------------------------------------------------------------
+        r.Right - r.Width * 0.28f,
+        r.Top + r.Height * 0.88f,
 
-        path.AddLine(
-            r.Right - r.Width * 0.15f,
-            r.Top + r.Height * 0.47f,
+        r.Right - r.Width * 0.22f,
+        r.Top + r.Height * 0.88f
+    );
 
-            r.Right - r.Width * 0.11f,
-            r.Top + r.Height * 0.34f
-        );
+    path.AddBezier(
+        r.Right - r.Width * 0.22f,
+        r.Top + r.Height * 0.88f,
 
+        r.Right - r.Width * 0.10f,
+        r.Top + r.Height * 0.88f,
 
-        path.AddLine(
-            r.Right - r.Width * 0.11f,
-            r.Top + r.Height * 0.34f,
+        r.Right - r.Width * 0.09f,
+        r.Top + r.Height * 0.75f,
 
-            r.Right - r.Width * 0.15f,
-            r.Top + r.Height * 0.22f
-        );
+        r.Right - r.Width * 0.14f,
+        r.Top + r.Height * 0.67f
+    );
 
+    // -------------------------------------------------------------
+    // Right lower cheek / side wall
+    // -------------------------------------------------------------
 
-        // -------------------------------------------------------------
-        // Upper-right forehead / crown
-        // -------------------------------------------------------------
+    path.AddLine(
+        r.Right - r.Width * 0.14f,
+        r.Top + r.Height * 0.67f,
 
-        path.AddBezier(
-            r.Right - r.Width * 0.15f,
-            r.Top + r.Height * 0.22f,
+        r.Right - r.Width * 0.14f,
+        r.Top + r.Height * 0.56f
+    );
 
-            r.Right - r.Width * 0.17f,
-            r.Top + r.Height * 0.13f,
+    // -------------------------------------------------------------
+    // Right temple flare
+    // -------------------------------------------------------------
 
-            r.Right - r.Width * 0.23f,
-            r.Top + r.Height * 0.045f,
+    path.AddLine(
+        r.Right - r.Width * 0.14f,
+        r.Top + r.Height * 0.56f,
 
-            r.Right - r.Width * 0.34f,
-            r.Top + r.Height * 0.025f
-        );
+        r.Right - r.Width * 0.07f,
+        r.Top + r.Height * 0.42f
+    );
 
+    path.AddLine(
+        r.Right - r.Width * 0.07f,
+        r.Top + r.Height * 0.42f,
 
-        path.AddLine(
-            r.Right - r.Width * 0.34f,
-            r.Top + r.Height * 0.025f,
+        r.Right - r.Width * 0.14f,
+        r.Top + r.Height * 0.38f
+    );
 
-            cx,
-            top
-        );
+    // -------------------------------------------------------------
+    // Right temple wall
+    // -------------------------------------------------------------
 
+    path.AddLine(
+        r.Right - r.Width * 0.14f,
+        r.Top + r.Height * 0.38f,
 
-        path.CloseFigure();
+        r.Right - r.Width * 0.14f,
+        r.Top + r.Height * 0.25f
+    );
 
-        return path;
-    }
+    // -------------------------------------------------------------
+    // Right dome / forehead
+    // -------------------------------------------------------------
+
+    path.AddBezier(
+        r.Right - r.Width * 0.14f,
+        r.Top + r.Height * 0.25f,
+
+        r.Right - r.Width * 0.18f,
+        r.Top + r.Height * 0.17f,
+
+        r.Right - r.Width * 0.24f,
+        r.Top + r.Height * 0.10f,
+
+        r.Right - r.Width * 0.35f,
+        r.Top + r.Height * 0.07f
+    );
+
+    path.AddLine(
+        r.Right - r.Width * 0.35f,
+        r.Top + r.Height * 0.07f,
+
+        r.Right - r.Width * 0.44f,
+        r.Top + r.Height * 0.07f
+    );
+
+    path.AddLine(
+        r.Right - r.Width * 0.44f,
+        r.Top + r.Height * 0.07f,
+
+        r.Right - r.Width * 0.44f,
+        top
+    );
+
+    path.AddLine(
+        r.Right - r.Width * 0.44f,
+        top,
+
+        cx,
+        top
+    );
+
+    path.CloseFigure();
+
+    return path;
+}
 }
 
 public class NovaWaveRecorder : IDisposable
@@ -2235,10 +2322,13 @@ Add-Type `
 
 $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 $recordingsDirectory = Join-Path $scriptDirectory "Recordings"
+$ffmpegPath = Join-Path $scriptDirectory "tools\ffmpeg\ffmpeg.exe"
 
 if (-not (Test-Path -LiteralPath $recordingsDirectory)) {
     New-Item -ItemType Directory -Path $recordingsDirectory | Out-Null
 }
+
+$script:ffmpegAvailable = Test-Path -LiteralPath $ffmpegPath
 
 
 # =====================================================================
@@ -2250,6 +2340,9 @@ $script:recorder = New-Object NovaWaveRecorder
 $script:recording = $false
 $script:recordingStart = $null
 $script:currentFile = $null
+$script:currentVideoFile = $null
+$script:videoProcess = $null
+$script:videoRecording = $false
 
 
 # =====================================================================
@@ -2264,15 +2357,153 @@ function Get-NewRecordingPath {
 }
 
 
+function Get-VideoRecordingPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$AudioPath
+    )
+
+    $directory = Split-Path -Parent $AudioPath
+    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($AudioPath)
+
+    return Join-Path $directory ($baseName + "_video.avi")
+}
+
+
+function Get-NovaVideoDevices {
+
+    if (-not $script:ffmpegAvailable) {
+        return @()
+    }
+
+    # FFmpeg writes DirectShow enumeration to stderr. Merge stderr into
+    # stdout so PowerShell can parse it without showing a console window.
+    $lines = & $ffmpegPath -hide_banner -list_devices true -f dshow -i dummy 2>&1
+
+    $devices = New-Object System.Collections.Generic.List[string]
+
+    foreach ($line in $lines) {
+        $text = [string]$line
+
+        # Only expose devices FFmpeg explicitly identifies as video.
+        # The built-in HP camera on this machine enumerates as "(none)"
+        # and cannot currently bind through DirectShow, so it is excluded.
+        if ($text -match '"([^"]+)"\s+\(video\)') {
+            $name = $matches[1]
+
+            if (-not $devices.Contains($name)) {
+                $devices.Add($name)
+            }
+        }
+    }
+
+    return $devices.ToArray()
+}
+
+
+function Start-NovaVideoCapture {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DeviceName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$OutputPath
+    )
+
+    if (-not $script:ffmpegAvailable) {
+        throw "Portable FFmpeg was not found at:`n$ffmpegPath"
+    }
+
+    if ($script:videoRecording) {
+        throw "Video capture is already running."
+    }
+
+    # Capture the webcam's native 1080p30 MJPEG stream without real-time
+    # H.264 transcoding. This keeps CPU load low and minimizes frame loss.
+    $arguments = @(
+        '-hide_banner'
+        '-loglevel', 'warning'
+        '-f', 'dshow'
+        '-rtbufsize', '256M'
+        '-video_size', '1920x1080'
+        '-framerate', '30'
+        '-i', ('video="' + $DeviceName + '"')
+        '-c:v', 'copy'
+        '-y'
+        ('"' + $OutputPath + '"')
+    ) -join ' '
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $ffmpegPath
+    $startInfo.Arguments = $arguments
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+
+    if (-not $process.Start()) {
+        throw "FFmpeg could not start video capture."
+    }
+
+    # Give DirectShow a moment to bind the camera. If FFmpeg exits
+    # immediately, surface that as a failed start instead of pretending
+    # video is recording.
+    Start-Sleep -Milliseconds 350
+
+    if ($process.HasExited) {
+        $exitCode = $process.ExitCode
+        $process.Dispose()
+        throw "FFmpeg exited before video capture started (exit code $exitCode)."
+    }
+
+    $script:videoProcess = $process
+    $script:videoRecording = $true
+}
+
+
+function Stop-NovaVideoCapture {
+
+    if (-not $script:videoRecording) {
+        return
+    }
+
+    $process = $script:videoProcess
+
+    try {
+        if ($null -ne $process -and -not $process.HasExited) {
+            # 'q' requests FFmpeg's normal shutdown path so AVI indexes and
+            # headers are finalized cleanly.
+            $process.StandardInput.WriteLine('q')
+            $process.StandardInput.Flush()
+
+            if (-not $process.WaitForExit(5000)) {
+                $process.Kill()
+                [void]$process.WaitForExit(2000)
+            }
+        }
+    }
+    finally {
+        if ($null -ne $process) {
+            $process.Dispose()
+        }
+
+        $script:videoProcess = $null
+        $script:videoRecording = $false
+    }
+}
+
+
 # =====================================================================
 # Main window
 # =====================================================================
 
 $form = New-Object System.Windows.Forms.Form
 
-$form.Text = "Nova Recorder v2.1"
+$form.Text = "Nova Recorder v2.2"
 
-$form.Size = New-Object System.Drawing.Size(540, 680)
+$form.Size = New-Object System.Drawing.Size(540, 755)
 
 $form.StartPosition = "CenterScreen"
 
@@ -2366,6 +2597,34 @@ $form.Controls.Add($refreshButton)
 
 
 # =====================================================================
+# Video capture controls
+# =====================================================================
+
+$videoLabel = New-Object System.Windows.Forms.Label
+$videoLabel.Text = "Video source"
+$videoLabel.ForeColor = [System.Drawing.Color]::Gainsboro
+$videoLabel.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$videoLabel.AutoSize = $true
+$videoLabel.Location = New-Object System.Drawing.Point(45, 145)
+$form.Controls.Add($videoLabel)
+
+$videoCombo = New-Object System.Windows.Forms.ComboBox
+$videoCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+$videoCombo.Size = New-Object System.Drawing.Size(340, 30)
+$videoCombo.Location = New-Object System.Drawing.Point(45, 169)
+$videoCombo.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+$form.Controls.Add($videoCombo)
+
+$videoCheckBox = New-Object System.Windows.Forms.CheckBox
+$videoCheckBox.Text = "Capture"
+$videoCheckBox.ForeColor = [System.Drawing.Color]::Gainsboro
+$videoCheckBox.AutoSize = $true
+$videoCheckBox.Location = New-Object System.Drawing.Point(400, 172)
+$videoCheckBox.Checked = $true
+$form.Controls.Add($videoCheckBox)
+
+
+# =====================================================================
 # Input meter label
 # =====================================================================
 
@@ -2382,7 +2641,7 @@ $levelLabel.Font = New-Object System.Drawing.Font(
 
 $levelLabel.AutoSize = $true
 
-$levelLabel.Location = New-Object System.Drawing.Point(45, 155)
+$levelLabel.Location = New-Object System.Drawing.Point(45, 220)
 
 $form.Controls.Add($levelLabel)
 
@@ -2405,7 +2664,7 @@ $clipLabel.Font = New-Object System.Drawing.Font(
 
 $clipLabel.AutoSize = $true
 
-$clipLabel.Location = New-Object System.Drawing.Point(445, 157)
+$clipLabel.Location = New-Object System.Drawing.Point(445, 222)
 
 $form.Controls.Add($clipLabel)
 
@@ -2418,7 +2677,7 @@ $headMeter = New-Object CyberHeadMeter
 
 $headMeter.Size = New-Object System.Drawing.Size(180, 180)
 
-$headMeter.Location = New-Object System.Drawing.Point(170, 175)
+$headMeter.Location = New-Object System.Drawing.Point(170, 240)
 
 $headMeter.Level = 0
 
@@ -2444,7 +2703,7 @@ $gainTitleLabel.Font = New-Object System.Drawing.Font(
 
 $gainTitleLabel.AutoSize = $true
 
-$gainTitleLabel.Location = New-Object System.Drawing.Point(45, 370)
+$gainTitleLabel.Location = New-Object System.Drawing.Point(45, 435)
 
 $form.Controls.Add($gainTitleLabel)
 
@@ -2467,7 +2726,7 @@ $gainValueLabel.Font = New-Object System.Drawing.Font(
 
 $gainValueLabel.AutoSize = $true
 
-$gainValueLabel.Location = New-Object System.Drawing.Point(430, 370)
+$gainValueLabel.Location = New-Object System.Drawing.Point(430, 435)
 
 $form.Controls.Add($gainValueLabel)
 
@@ -2492,7 +2751,7 @@ $gainSlider.LargeChange = 4
 
 $gainSlider.Size = New-Object System.Drawing.Size(390, 38)
 
-$gainSlider.Location = New-Object System.Drawing.Point(40, 382)
+$gainSlider.Location = New-Object System.Drawing.Point(40, 447)
 
 $form.Controls.Add($gainSlider)
 
@@ -2503,7 +2762,7 @@ $gainZeroLabel = New-Object System.Windows.Forms.Label
 $gainZeroLabel.Text = "0"
 $gainZeroLabel.ForeColor = [System.Drawing.Color]::Gray
 $gainZeroLabel.AutoSize = $true
-$gainZeroLabel.Location = New-Object System.Drawing.Point(48, 435)
+$gainZeroLabel.Location = New-Object System.Drawing.Point(48, 500)
 $form.Controls.Add($gainZeroLabel)
 
 
@@ -2511,7 +2770,7 @@ $gainSixLabel = New-Object System.Windows.Forms.Label
 $gainSixLabel.Text = "+8"
 $gainSixLabel.ForeColor = [System.Drawing.Color]::Gray
 $gainSixLabel.AutoSize = $true
-$gainSixLabel.Location = New-Object System.Drawing.Point(139, 435)
+$gainSixLabel.Location = New-Object System.Drawing.Point(139, 500)
 $form.Controls.Add($gainSixLabel)
 
 
@@ -2519,7 +2778,7 @@ $gainTwelveLabel = New-Object System.Windows.Forms.Label
 $gainTwelveLabel.Text = "+16"
 $gainTwelveLabel.ForeColor = [System.Drawing.Color]::Gray
 $gainTwelveLabel.AutoSize = $true
-$gainTwelveLabel.Location = New-Object System.Drawing.Point(230, 435)
+$gainTwelveLabel.Location = New-Object System.Drawing.Point(230, 500)
 $form.Controls.Add($gainTwelveLabel)
 
 
@@ -2527,7 +2786,7 @@ $gainEighteenLabel = New-Object System.Windows.Forms.Label
 $gainEighteenLabel.Text = "+32 dB"
 $gainEighteenLabel.ForeColor = [System.Drawing.Color]::Gray
 $gainEighteenLabel.AutoSize = $true
-$gainEighteenLabel.Location = New-Object System.Drawing.Point(318, 435)
+$gainEighteenLabel.Location = New-Object System.Drawing.Point(318, 500)
 $form.Controls.Add($gainEighteenLabel)
 
 
@@ -2536,7 +2795,7 @@ $gainTwentyFourLabel = New-Object System.Windows.Forms.Label
 $gainTwentyFourLabel.Text = "+24"
 $gainTwentyFourLabel.ForeColor = [System.Drawing.Color]::Gray
 $gainTwentyFourLabel.AutoSize = $true
-$gainTwentyFourLabel.Location = New-Object System.Drawing.Point(405, 435)
+$gainTwentyFourLabel.Location = New-Object System.Drawing.Point(405, 500)
 
 $form.Controls.Add($gainTwentyFourLabel)
 
@@ -2563,7 +2822,7 @@ $statusLabel.Font = New-Object System.Drawing.Font(
 
 $statusLabel.AutoSize = $true
 
-$statusLabel.Location = New-Object System.Drawing.Point(200, 465)
+$statusLabel.Location = New-Object System.Drawing.Point(200, 530)
 
 $form.Controls.Add($statusLabel)
 
@@ -2586,7 +2845,7 @@ $timerLabel.Font = New-Object System.Drawing.Font(
 
 $timerLabel.AutoSize = $true
 
-$timerLabel.Location = New-Object System.Drawing.Point(185, 495)
+$timerLabel.Location = New-Object System.Drawing.Point(185, 560)
 
 $form.Controls.Add($timerLabel)
 
@@ -2601,7 +2860,7 @@ $recordButton.Text = "RECORD"
 
 $recordButton.Size = New-Object System.Drawing.Size(145, 48)
 
-$recordButton.Location = New-Object System.Drawing.Point(95, 550)
+$recordButton.Location = New-Object System.Drawing.Point(95, 615)
 
 $recordButton.Font = New-Object System.Drawing.Font(
     "Segoe UI",
@@ -2632,7 +2891,7 @@ $stopButton.Text = "STOP"
 
 $stopButton.Size = New-Object System.Drawing.Size(145, 48)
 
-$stopButton.Location = New-Object System.Drawing.Point(285, 550)
+$stopButton.Location = New-Object System.Drawing.Point(285, 615)
 
 $stopButton.Font = New-Object System.Drawing.Font(
     "Segoe UI",
@@ -2665,7 +2924,7 @@ $folderButton.Text = "Open Recordings Folder"
 
 $folderButton.Size = New-Object System.Drawing.Size(205, 30)
 
-$folderButton.Location = New-Object System.Drawing.Point(160, 610)
+$folderButton.Location = New-Object System.Drawing.Point(160, 675)
 
 $form.Controls.Add($folderButton)
 
@@ -2726,6 +2985,62 @@ function Update-DeviceList {
     $statusLabel.Text = "Microphone ready"
 
     $statusLabel.ForeColor = [System.Drawing.Color]::LightGreen
+}
+
+
+function Update-VideoDeviceList {
+
+    $previousName = $null
+
+    if ($null -ne $videoCombo.SelectedItem) {
+        $previousName = [string]$videoCombo.SelectedItem
+    }
+
+    $videoCombo.Items.Clear()
+
+    if (-not $script:ffmpegAvailable) {
+        $videoCombo.Enabled = $false
+        $videoCheckBox.Checked = $false
+        $videoCheckBox.Enabled = $false
+        return
+    }
+
+    $videoCheckBox.Enabled = $true
+
+    try {
+        $devices = @(Get-NovaVideoDevices)
+    }
+    catch {
+        $devices = @()
+    }
+
+    foreach ($device in $devices) {
+        [void]$videoCombo.Items.Add($device)
+    }
+
+    if ($videoCombo.Items.Count -eq 0) {
+        $videoCombo.Enabled = $false
+        $videoCheckBox.Checked = $false
+        return
+    }
+
+    $videoCombo.Enabled = $true
+
+    $selected = $false
+
+    if ($null -ne $previousName) {
+        for ($i = 0; $i -lt $videoCombo.Items.Count; $i++) {
+            if ([string]$videoCombo.Items[$i] -eq $previousName) {
+                $videoCombo.SelectedIndex = $i
+                $selected = $true
+                break
+            }
+        }
+    }
+
+    if (-not $selected) {
+        $videoCombo.SelectedIndex = 0
+    }
 }
 
 
@@ -2876,6 +3191,7 @@ $refreshButton.Add_Click({
     }
 
     Update-DeviceList
+    Update-VideoDeviceList
 })
 
 
@@ -2905,7 +3221,24 @@ $recordButton.Add_Click({
 
     $device = $deviceCombo.SelectedItem
 
+    if ($videoCheckBox.Checked -and $null -eq $videoCombo.SelectedItem) {
+
+        [System.Windows.Forms.MessageBox]::Show(
+            "Video capture is enabled, but no usable camera is selected.",
+            "Nova Recorder",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+
+        return
+    }
+
     $script:currentFile = Get-NewRecordingPath
+    $script:currentVideoFile = $null
+
+    if ($videoCheckBox.Checked) {
+        $script:currentVideoFile = Get-VideoRecordingPath -AudioPath $script:currentFile
+    }
 
 
     try {
@@ -2918,6 +3251,25 @@ $recordButton.Add_Click({
             $device.Id,
             $script:currentFile
         )
+
+        if ($videoCheckBox.Checked) {
+            try {
+                Start-NovaVideoCapture `
+                    -DeviceName ([string]$videoCombo.SelectedItem) `
+                    -OutputPath $script:currentVideoFile
+            }
+            catch {
+                # Audio already started. Stop it so RECORD remains atomic:
+                # either both requested streams start, or neither does.
+                try {
+                    $script:recorder.Stop()
+                }
+                catch {
+                }
+
+                throw
+            }
+        }
     }
     catch {
 
@@ -2956,6 +3308,9 @@ $recordButton.Add_Click({
 
     $deviceCombo.Enabled = $false
 
+    $videoCombo.Enabled = $false
+    $videoCheckBox.Enabled = $false
+
     $refreshButton.Enabled = $false
 
 
@@ -2978,6 +3333,17 @@ $stopButton.Add_Click({
 
     $uiTimer.Stop()
 
+
+    $videoStopError = $null
+
+    if ($script:videoRecording) {
+        try {
+            Stop-NovaVideoCapture
+        }
+        catch {
+            $videoStopError = $_.Exception.Message
+        }
+    }
 
     try {
 
@@ -3016,6 +3382,9 @@ $stopButton.Add_Click({
 
     $deviceCombo.Enabled = $true
 
+    $videoCheckBox.Enabled = $script:ffmpegAvailable
+    $videoCombo.Enabled = ($script:ffmpegAvailable -and $videoCombo.Items.Count -gt 0)
+
     $refreshButton.Enabled = $true
 
 
@@ -3042,12 +3411,30 @@ $stopButton.Add_Click({
         $formatText += ", $($script:recorder.BitsPerSample)-bit PCM"
 
 
-        [System.Windows.Forms.MessageBox]::Show(
-            "Recording saved.`n`n" +
+        $message =
+            "Audio recording saved.`n`n" +
             "$script:currentFile`n`n" +
             "Format: $formatText`n" +
             "Gain: +$($gainSlider.Value) dB`n" +
-            "Size: $sizeKB KB",
+            "Size: $sizeKB KB"
+
+        if ($null -ne $script:currentVideoFile -and (Test-Path -LiteralPath $script:currentVideoFile)) {
+            $videoInfo = Get-Item -LiteralPath $script:currentVideoFile
+            $videoSizeMB = [Math]::Round($videoInfo.Length / 1MB, 1)
+
+            $message +=
+                "`n`nVideo recording saved separately:`n" +
+                "$script:currentVideoFile`n" +
+                "Format: 1920x1080, 30 fps, native MJPEG`n" +
+                "Size: $videoSizeMB MB"
+        }
+
+        if ($null -ne $videoStopError) {
+            $message += "`n`nVideo stop warning: $videoStopError"
+        }
+
+        [System.Windows.Forms.MessageBox]::Show(
+            $message,
             "Nova Recorder",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Information
@@ -3104,6 +3491,10 @@ $form.Add_FormClosing({
 
                 $uiTimer.Stop()
 
+                if ($script:videoRecording) {
+                    Stop-NovaVideoCapture
+                }
+
                 $script:recorder.Stop()
 
                 $script:recording = $false
@@ -3126,6 +3517,14 @@ $form.Add_FormClosing({
 
 
     try {
+        if ($script:videoRecording) {
+            Stop-NovaVideoCapture
+        }
+    }
+    catch {
+    }
+
+    try {
         $script:recorder.Dispose()
     }
     catch {
@@ -3138,6 +3537,7 @@ $form.Add_FormClosing({
 # =====================================================================
 
 Update-DeviceList
+Update-VideoDeviceList
 
 $uiTimer.Start()
 
