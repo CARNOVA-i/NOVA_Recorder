@@ -2493,6 +2493,51 @@ function Get-NovaVideoModes {
 }
 
 
+function Get-NovaAudioDeviceNames {
+    if (-not $script:ffmpegAvailable) {
+        return @()
+    }
+
+    $lines = & $ffmpegPath `
+        -hide_banner `
+        -list_devices true `
+        -f dshow `
+        -i dummy 2>&1
+
+    $names = New-Object System.Collections.Generic.List[string]
+
+    foreach ($line in $lines) {
+        $text = [string]$line
+
+        if ($text -match '"([^"]+)"\s+\(audio\)') {
+            $name = $matches[1]
+
+            if (-not $names.Contains($name)) {
+                $names.Add($name)
+            }
+        }
+    }
+
+    return @($names)
+}
+
+function ConvertTo-NovaDeviceMatchKey {
+    param(
+        [string]$Name
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Name)) {
+        return ""
+    }
+
+    return (
+        $Name.ToLowerInvariant() `
+            -replace '[^a-z0-9 ]', '' `
+            -replace '\s+', ' '
+    ).Trim()
+}
+
+
 function Start-NovaVideoCapture {
     param(
         [Parameter(Mandatory = $true)]
@@ -3086,8 +3131,25 @@ function Update-DeviceList {
     $deviceCombo.Items.Clear()
 
     $devices = [NovaWaveRecorder]::GetDevices()
+    $fullAudioNames = @(Get-NovaAudioDeviceNames)
 
     foreach ($device in $devices) {
+
+        $legacyKey = ConvertTo-NovaDeviceMatchKey -Name $device.Name
+
+        foreach ($fullName in $fullAudioNames) {
+
+            $fullKey = ConvertTo-NovaDeviceMatchKey -Name $fullName
+
+            if (
+                $fullKey.StartsWith($legacyKey) -or
+                $legacyKey.StartsWith($fullKey)
+            ) {
+                $device.Name = $fullName
+                break
+            }
+        }
+
         [void]$deviceCombo.Items.Add($device)
     }
 
@@ -3513,9 +3575,20 @@ $stopButton.Add_Click({
         )
     }
 
+    $sessionFolder = Split-Path -Parent $script:currentFile
+
+    $recordingEnd = Get-Date
+
+    Write-NovaSessionMetadata `
+        -SessionFolder $sessionFolder `
+        -AudioDevice $deviceCombo.SelectedItem `
+        -GainDb ([double]$gainSlider.Value) `
+        -VideoDevice $videoCombo.SelectedItem `
+        -VideoMode $script:currentVideoMode `
+        -Started $script:recordingStart `
+        -Ended $recordingEnd
 
     $script:recording = $false
-
     $script:recordingStart = $null
 
 
@@ -3603,6 +3676,76 @@ $stopButton.Add_Click({
 
     Start-LivePreview
 })
+
+# =====================================================================
+# Save metadata file
+# =====================================================================
+
+function Write-NovaSessionMetadata {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SessionFolder,
+
+        [Parameter(Mandatory = $true)]
+        [object]$AudioDevice,
+
+        [Parameter(Mandatory = $true)]
+        [double]$GainDb,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$Started,
+
+        [Parameter(Mandatory = $true)]
+        [datetime]$Ended,
+
+        [object]$VideoDevice,
+
+        [object]$VideoMode
+    )
+
+    $durationSeconds = [Math]::Round(
+        ($Ended - $Started).TotalSeconds,
+        3
+    )
+
+    $metadata = [ordered]@{
+        started         = $Started.ToString("o")
+        ended           = $Ended.ToString("o")
+        durationSeconds = $durationSeconds
+
+        audio = [ordered]@{
+            file       = "audio.wav"
+            device     = [string]$AudioDevice
+            sampleRate = 48000
+            channels   = 2
+            bitDepth   = 16
+            gainDb     = $GainDb
+        }
+
+        video = $null
+    }
+
+    if ($null -ne $VideoDevice -and $null -ne $VideoMode) {
+        $metadata.video = [ordered]@{
+            file   = "video.avi"
+            device = [string]$VideoDevice
+            codec  = [string]$VideoMode.Codec
+            width  = [int]$VideoMode.Width
+            height = [int]$VideoMode.Height
+            fps    = [double]$VideoMode.MaxFps
+        }
+    }
+
+    $jsonPath = Join-Path $SessionFolder "session.json"
+
+    $metadata |
+        ConvertTo-Json -Depth 5 |
+        Set-Content -Path $jsonPath -Encoding UTF8
+}
+
+
+
+
 
 
 # =====================================================================
@@ -3697,6 +3840,16 @@ $uiTimer.Start()
 
 Start-LivePreview
 
+# ====================================================================
+# List audio device names for troubleshooting
+# ====================================================================
 
+#Write-Host ""
+#Write-Host "=== NOVA AUDIO DEVICE NAMES ==="
+
+
+#Get-NovaAudioDeviceNames | ForEach-Object {
+#   Write-Host $_
+#}
 
 [void]$form.ShowDialog()
