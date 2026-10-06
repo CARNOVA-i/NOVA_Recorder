@@ -2349,11 +2349,39 @@ $script:videoRecording = $false
 # Helpers
 # =====================================================================
 
+
+function New-NovaRecordingSession {
+    $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+
+    $sessionFolder = Join-Path `
+        $recordingsDirectory `
+        "Recording_$timestamp"
+
+    New-Item `
+        -ItemType Directory `
+        -Path $sessionFolder `
+        -Force | Out-Null
+
+    return $sessionFolder
+}
+
+
+
+
 function Get-NewRecordingPath {
 
     $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
 
-    return Join-Path $recordingsDirectory "Recording_$timestamp.wav"
+    $sessionFolder = Join-Path `
+        $recordingsDirectory `
+        "Recording_$timestamp"
+
+    New-Item `
+        -ItemType Directory `
+        -Path $sessionFolder `
+        -Force | Out-Null
+
+    return Join-Path $sessionFolder "audio.wav"
 }
 
 
@@ -2364,9 +2392,8 @@ function Get-VideoRecordingPath {
     )
 
     $directory = Split-Path -Parent $AudioPath
-    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($AudioPath)
 
-    return Join-Path $directory ($baseName + "_video.avi")
+    return Join-Path $directory "video.avi"
 }
 
 
