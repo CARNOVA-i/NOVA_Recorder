@@ -2400,6 +2400,71 @@ function Get-NovaVideoDevices {
     return $devices.ToArray()
 }
 
+function Get-NovaVideoModes {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DeviceName
+    )
+
+    if (-not $script:ffmpegAvailable) {
+        return @()
+    }
+
+    $lines = & $ffmpegPath `
+        -hide_banner `
+        -f dshow `
+        -list_options true `
+        -i ('video=' + $DeviceName) 2>&1
+
+    $modes = New-Object System.Collections.Generic.List[object]
+
+    foreach ($line in $lines) {
+        $text = [string]$line
+
+        # Prefer native MJPEG modes because we can stream-copy them
+        # during capture without expensive real-time re-encoding.
+        if ($text -match 'vcodec=mjpeg\s+min s=(\d+)x(\d+)\s+fps=([\d\.]+)\s+max s=\d+x\d+\s+fps=([\d\.]+)') {
+
+            $width  = [int]$matches[1]
+            $height = [int]$matches[2]
+            $minFps = [double]$matches[3]
+            $maxFps = [double]$matches[4]
+
+            $key = "$width`x$height@$maxFps"
+
+            $alreadyExists = $false
+
+            foreach ($existing in $modes) {
+                if ($existing.Key -eq $key) {
+                    $alreadyExists = $true
+                    break
+                }
+            }
+
+            if (-not $alreadyExists) {
+                $modes.Add(
+                    [PSCustomObject]@{
+                        Key       = $key
+                        Codec     = 'mjpeg'
+                        Width     = $width
+                        Height    = $height
+                        MinFps    = $minFps
+                        MaxFps    = $maxFps
+                        Display   = "$width x $height @ $maxFps fps"
+                    }
+                )
+            }
+        }
+    }
+
+    return @(
+        $modes |
+        Sort-Object `
+            @{ Expression = { $_.Width * $_.Height }; Descending = $true },
+            @{ Expression = { $_.MaxFps }; Descending = $true }
+    )
+}
+
 
 function Start-NovaVideoCapture {
     param(
@@ -2407,7 +2472,10 @@ function Start-NovaVideoCapture {
         [string]$DeviceName,
 
         [Parameter(Mandatory = $true)]
-        [string]$OutputPath
+        [string]$OutputPath,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Mode
     )
 
     if (-not $script:ffmpegAvailable) {
@@ -2418,15 +2486,20 @@ function Start-NovaVideoCapture {
         throw "Video capture is already running."
     }
 
-    # Capture the webcam's native 1080p30 MJPEG stream without real-time
+    $videoSize = "$($Mode.Width)x$($Mode.Height)"
+    $frameRate = [string]$Mode.MaxFps
+    $codec     = [string]$Mode.Codec
+
+    # Capture the selected camera's native MJPEG mode without real-time
     # H.264 transcoding. This keeps CPU load low and minimizes frame loss.
     $arguments = @(
         '-hide_banner'
         '-loglevel', 'warning'
         '-f', 'dshow'
         '-rtbufsize', '256M'
-        '-video_size', '1920x1080'
-        '-framerate', '30'
+        '-video_size', $videoSize
+        '-framerate', $frameRate
+        '-vcodec', $codec
         '-i', ('video="' + $DeviceName + '"')
         '-c:v', 'copy'
         '-y'
@@ -2494,6 +2567,30 @@ function Stop-NovaVideoCapture {
     }
 }
 
+
+function Update-NovaVideoModes {
+    $videoModeCombo.Items.Clear()
+
+    if (-not $videoCombo.SelectedItem) {
+        $videoModeCombo.Enabled = $false
+        return
+    }
+
+    $deviceName = [string]$videoCombo.SelectedItem
+    $modes = Get-NovaVideoModes -DeviceName $deviceName
+
+    foreach ($mode in $modes) {
+        [void]$videoModeCombo.Items.Add($mode)
+    }
+
+    if ($videoModeCombo.Items.Count -gt 0) {
+        $videoModeCombo.SelectedIndex = 0
+        $videoModeCombo.Enabled = $true
+    }
+    else {
+        $videoModeCombo.Enabled = $false
+    }
+}
 
 # =====================================================================
 # Main window
@@ -2622,6 +2719,24 @@ $videoCheckBox.AutoSize = $true
 $videoCheckBox.Location = New-Object System.Drawing.Point(400, 172)
 $videoCheckBox.Checked = $true
 $form.Controls.Add($videoCheckBox)
+
+$videoModeLabel = New-Object System.Windows.Forms.Label
+$videoModeLabel.Text = "Video mode"
+$videoModeLabel.Location = New-Object System.Drawing.Point(48, 225)
+$videoModeLabel.Size = New-Object System.Drawing.Size(100, 20)
+$videoModeLabel.ForeColor = [System.Drawing.Color]::White
+$form.Controls.Add($videoModeLabel)
+
+$videoModeCombo = New-Object System.Windows.Forms.ComboBox
+$videoModeCombo.Location = New-Object System.Drawing.Point(48, 245)
+$videoModeCombo.Size = New-Object System.Drawing.Size(338, 24)
+$videoModeCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+$videoModeCombo.DisplayMember = "Display"
+$form.Controls.Add($videoModeCombo)
+
+$videoCombo.Add_SelectedIndexChanged({
+    Update-NovaVideoModes
+})
 
 
 # =====================================================================
@@ -3041,6 +3156,8 @@ function Update-VideoDeviceList {
     if (-not $selected) {
         $videoCombo.SelectedIndex = 0
     }
+
+Update-NovaVideoModes
 }
 
 
@@ -3253,11 +3370,21 @@ $recordButton.Add_Click({
         )
 
         if ($videoCheckBox.Checked) {
-            try {
-                Start-NovaVideoCapture `
-                    -DeviceName ([string]$videoCombo.SelectedItem) `
-                    -OutputPath $script:currentVideoFile
-            }
+    try {
+        $selectedVideoMode = $videoModeCombo.SelectedItem
+        
+
+        if ($null -eq $selectedVideoMode) {
+            throw "No video mode is selected."
+        }
+
+        $script:currentVideoMode = $selectedVideoMode
+
+        Start-NovaVideoCapture `
+            -DeviceName ([string]$videoCombo.SelectedItem) `
+            -OutputPath $script:currentVideoFile `
+            -Mode $selectedVideoMode
+    }
             catch {
                 # Audio already started. Stop it so RECORD remains atomic:
                 # either both requested streams start, or neither does.
@@ -3425,7 +3552,7 @@ $stopButton.Add_Click({
             $message +=
                 "`n`nVideo recording saved separately:`n" +
                 "$script:currentVideoFile`n" +
-                "Format: 1920x1080, 30 fps, native MJPEG`n" +
+                "Format: $($script:currentVideoMode.Width)x$($script:currentVideoMode.Height), $($script:currentVideoMode.MaxFps) fps, native MJPEG`n" +
                 "Size: $videoSizeMB MB"
         }
 
@@ -3542,5 +3669,7 @@ Update-VideoDeviceList
 $uiTimer.Start()
 
 Start-LivePreview
+
+
 
 [void]$form.ShowDialog()
