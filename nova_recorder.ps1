@@ -3638,9 +3638,12 @@ $stopButton.Add_Click({
         $formatText += ", $($script:recorder.BitsPerSample)-bit PCM"
 
 
+        $sessionFolder = Split-Path -Parent $script:currentFile
+
         $message =
-            "Audio recording saved.`n`n" +
-            "$script:currentFile`n`n" +
+            "Recording session saved:`n`n" +
+            "$sessionFolder`n`n" +
+            "Audio: audio.wav`n" +
             "Format: $formatText`n" +
             "Gain: +$($gainSlider.Value) dB`n" +
             "Size: $sizeKB KB"
@@ -3650,10 +3653,15 @@ $stopButton.Add_Click({
             $videoSizeMB = [Math]::Round($videoInfo.Length / 1MB, 1)
 
             $message +=
-                "`n`nVideo recording saved separately:`n" +
-                "$script:currentVideoFile`n" +
+                "`n`nVideo: video.avi`n" +
                 "Format: $($script:currentVideoMode.Width)x$($script:currentVideoMode.Height), $($script:currentVideoMode.MaxFps) fps, native MJPEG`n" +
                 "Size: $videoSizeMB MB"
+        }
+
+        $metadataPath = Join-Path $sessionFolder "session.json"
+
+        if (Test-Path -LiteralPath $metadataPath) {
+            $message += "`n`nMetadata: session.json"
         }
 
         if ($null -ne $videoStopError) {
@@ -3840,16 +3848,23 @@ $uiTimer.Start()
 
 Start-LivePreview
 
-# ====================================================================
-# List audio device names for troubleshooting
-# ====================================================================
+# =====================================================================
+# START audio device-name diagnostics
+# =====================================================================
+
+# START UNCOMMENT HERE FOR TROUBLESHOOTING ONLY
 
 #Write-Host ""
 #Write-Host "=== NOVA AUDIO DEVICE NAMES ==="
 
-
 #Get-NovaAudioDeviceNames | ForEach-Object {
-#   Write-Host $_
+#    Write-Host $_
 #}
+
+# STOP UNCOMMENT HERE FOR TROUBLESHOOTING ONLY
+
+# =====================================================================
+# END audio device-name diagnostics
+# =====================================================================
 
 [void]$form.ShowDialog()
