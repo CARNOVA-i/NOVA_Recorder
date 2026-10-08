@@ -3838,6 +3838,61 @@ $form.Add_FormClosing({
 
 
 # =====================================================================
+# Nova Combined Mp4
+# =====================================================================
+
+function New-NovaCombinedMp4 {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$SessionFolder
+    )
+
+    $audioPath = Join-Path $SessionFolder "audio.wav"
+    $videoPath = Join-Path $SessionFolder "video.avi"
+    $outputPath = Join-Path $SessionFolder "combined.mp4"
+
+    if (-not (Test-Path -LiteralPath $audioPath)) {
+        throw "Audio source not found: $audioPath"
+    }
+
+    if (-not (Test-Path -LiteralPath $videoPath)) {
+        throw "Video source not found: $videoPath"
+    }
+
+    $arguments = @(
+        '-hide_banner'
+        '-loglevel', 'warning'
+        '-i', ('"' + $videoPath + '"')
+        '-i', ('"' + $audioPath + '"')
+        '-c:v', 'libx264'
+        '-preset', 'fast'
+        '-crf', '20'
+        '-c:a', 'aac'
+        '-b:a', '192k'
+        '-shortest'
+        '-y'
+        ('"' + $outputPath + '"')
+    ) -join ' '
+
+    $process = Start-Process `
+        -FilePath $ffmpegPath `
+        -ArgumentList $arguments `
+        -NoNewWindow `
+        -Wait `
+        -PassThru
+
+    if ($process.ExitCode -ne 0) {
+        throw "FFmpeg failed to create combined.mp4 (exit code $($process.ExitCode))."
+    }
+
+    return $outputPath
+}
+
+
+
+
+
+# =====================================================================
 # Startup
 # =====================================================================
 
