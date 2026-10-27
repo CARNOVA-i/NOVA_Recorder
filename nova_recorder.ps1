@@ -1007,6 +1007,10 @@ public class NovaWaveRecorder : IDisposable
 
     private volatile bool previewing = false;
 
+    private bool firstBufferSeen = false;
+
+    public long FirstBufferTimestamp { get; private set; }
+
     private int currentPeak = 0;
 
     private int clippingFlag = 0;
@@ -1426,6 +1430,8 @@ public class NovaWaveRecorder : IDisposable
             0
         );
 
+        firstBufferSeen = false;
+        FirstBufferTimestamp = 0;
 
         // Try common PCM capture formats.
         //
@@ -1715,6 +1721,11 @@ public class NovaWaveRecorder : IDisposable
 
             if (header.dwBytesRecorded > 0)
             {
+                if (!firstBufferSeen)
+                {
+                    firstBufferSeen = true;
+                    FirstBufferTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+                }
                 int length =
                     (int)header.dwBytesRecorded;
 
@@ -3564,6 +3575,9 @@ $stopButton.Add_Click({
     try {
 
         $script:recorder.Stop()
+
+        # Temporary debug output
+        Write-Host "First audio buffer timestamp: $($script:recorder.FirstBufferTimestamp)"
     }
     catch {
 
