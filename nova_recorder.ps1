@@ -3858,7 +3858,9 @@ $form.Add_FormClosing({
 function New-NovaCombinedMp4 {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$SessionFolder
+        [string]$SessionFolder,
+
+        [double]$AudioOffsetSeconds = 0
     )
 
     $audioPath = Join-Path $SessionFolder "audio.wav"
@@ -3873,11 +3875,21 @@ function New-NovaCombinedMp4 {
         throw "Video source not found: $videoPath"
     }
 
+    $audioOffsetText =
+        $AudioOffsetSeconds.ToString(
+            '0.0000',
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )
+
+    $audioFilter =
+        "atrim=start=$audioOffsetText,asetpts=PTS-STARTPTS,apad"
+
     $arguments = @(
         '-hide_banner'
         '-loglevel', 'warning'
         '-i', ('"' + $videoPath + '"')
         '-i', ('"' + $audioPath + '"')
+        '-af', ('"' + $audioFilter + '"')
         '-c:v', 'libx264'
         '-preset', 'fast'
         '-crf', '20'
@@ -3886,7 +3898,9 @@ function New-NovaCombinedMp4 {
         '-shortest'
         '-y'
         ('"' + $outputPath + '"')
-    ) -join ' '
+    )
+
+    $arguments = $arguments -join ' '
 
     $process = Start-Process `
         -FilePath $ffmpegPath `
