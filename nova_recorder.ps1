@@ -822,6 +822,86 @@ public class CyberHeadMeter : Control
 }
 }
 
+public class NovaFfmpegReadyMonitor : IDisposable
+{
+    private System.Diagnostics.Process process;
+    private System.Threading.Thread monitorThread;
+    private volatile bool stopping = false;
+    private volatile bool videoReady = false;
+
+    public bool VideoReady
+    {
+        get
+        {
+            return videoReady;
+        }
+    }
+
+    public NovaFfmpegReadyMonitor(
+        System.Diagnostics.Process ffmpegProcess
+    )
+    {
+        process = ffmpegProcess;
+    }
+
+    public void Start()
+    {
+        stopping = false;
+        videoReady = false;
+
+        monitorThread =
+            new System.Threading.Thread(MonitorLoop);
+
+        monitorThread.IsBackground = true;
+        monitorThread.Start();
+    }
+
+    private void MonitorLoop()
+    {
+        try
+        {
+            while (!stopping && !process.HasExited)
+            {
+                string line =
+                    process.StandardError.ReadLine();
+
+                if (line == null)
+                {
+                    break;
+                }
+
+                if (line.StartsWith("frame="))
+                {
+                    string value =
+                        line.Substring(6).Trim();
+
+                    int frameNumber;
+
+                    if (
+                        int.TryParse(
+                            value,
+                            out frameNumber
+                        ) &&
+                        frameNumber >= 1
+                    )
+                    {
+                        videoReady = true;
+                    }
+                }
+            }
+        }
+        catch
+        {
+            // Readiness telemetry must never crash recording.
+        }
+    }
+
+    public void Dispose()
+    {
+        stopping = true;
+    }
+}
+
 public class NovaWaveRecorder : IDisposable
 {
     // -----------------------------------------------------------------
@@ -2585,6 +2665,9 @@ function Start-NovaVideoCapture {
         '-vcodec', $codec
         '-i', ('video="' + $DeviceName + '"')
         '-c:v', 'copy'
+        '-progress', 'pipe:2'
+        '-stats_period', '0.05'
+        '-nostats'
         '-y'
         ('"' + $OutputPath + '"')
     ) -join ' '
@@ -2595,6 +2678,7 @@ function Start-NovaVideoCapture {
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardError = $true
 
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $startInfo
@@ -2603,6 +2687,11 @@ function Start-NovaVideoCapture {
         throw "FFmpeg could not start video capture."
     }
 
+    $script:videoReadyMonitor =
+        New-Object NovaFfmpegReadyMonitor -ArgumentList $process
+
+    $script:videoReadyMonitor.Start()
+
     # Give DirectShow a moment to bind the camera. If FFmpeg exits
     # immediately, surface that as a failed start instead of pretending
     # video is recording.
@@ -2610,6 +2699,12 @@ function Start-NovaVideoCapture {
 
     if ($process.HasExited) {
         $exitCode = $process.ExitCode
+
+        if ($null -ne $script:videoReadyMonitor) {
+            $script:videoReadyMonitor.Dispose()
+            $script:videoReadyMonitor = $null
+        }
+        
         $process.Dispose()
         throw "FFmpeg exited before video capture started (exit code $exitCode)."
     }
@@ -2641,6 +2736,12 @@ function Stop-NovaVideoCapture {
         }
     }
     finally {
+
+        if ($null -ne $script:videoReadyMonitor) {
+            $script:videoReadyMonitor.Dispose()
+            $script:videoReadyMonitor = $null
+        }
+
         if ($null -ne $process) {
             $process.Dispose()
         }
@@ -3460,19 +3561,13 @@ $recordButton.Add_Click({
 
     try {
 
-        $script:recorder.SetGainDb(
-            [double]$gainSlider.Value
-        )
+    $script:recorder.SetGainDb(
+        [double]$gainSlider.Value
+    )
 
-        $script:recorder.Start(
-            $device.Id,
-            $script:currentFile
-        )
+    if ($videoCheckBox.Checked) {
 
-        if ($videoCheckBox.Checked) {
-    try {
         $selectedVideoMode = $videoModeCombo.SelectedItem
-        
 
         if ($null -eq $selectedVideoMode) {
             throw "No video mode is selected."
@@ -3480,35 +3575,82 @@ $recordButton.Add_Click({
 
         $script:currentVideoMode = $selectedVideoMode
 
+        $statusLabel.Text = "STARTING CAMERA..."
+        $statusLabel.ForeColor = [System.Drawing.Color]::Goldenrod
+
         Start-NovaVideoCapture `
             -DeviceName ([string]$videoCombo.SelectedItem) `
             -OutputPath $script:currentVideoFile `
             -Mode $selectedVideoMode
-    }
-            catch {
-                # Audio already started. Stop it so RECORD remains atomic:
-                # either both requested streams start, or neither does.
-                try {
-                    $script:recorder.Stop()
-                }
-                catch {
-                }
 
-                throw
+        # Wait until FFmpeg confirms that the camera is
+        # actually producing video frames.
+        $videoReadyDeadline = (Get-Date).AddSeconds(15)
+
+        while (
+            $null -ne $script:videoReadyMonitor -and
+            -not $script:videoReadyMonitor.VideoReady
+        ) {
+            if ((Get-Date) -ge $videoReadyDeadline) {
+                throw "Camera did not begin producing video within 15 seconds."
             }
+
+            if (
+                $null -ne $script:videoProcess -and
+                $script:videoProcess.HasExited
+            ) {
+                throw "FFmpeg exited while waiting for the camera to become ready."
+            }
+
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 10
+        }
+
+        if (
+            $null -eq $script:videoReadyMonitor -or
+            -not $script:videoReadyMonitor.VideoReady
+        ) {
+            throw "Camera readiness could not be confirmed."
         }
     }
-    catch {
 
-        [System.Windows.Forms.MessageBox]::Show(
-            $_.Exception.Message,
-            "Nova Recorder",
-            [System.Windows.Forms.MessageBoxButtons]::OK,
-            [System.Windows.Forms.MessageBoxIcon]::Error
-        )
+    # Audio starts only after video is confirmed ready.
+    $script:recorder.Start(
+        $device.Id,
+        $script:currentFile
+    )
+}
+catch {
 
-        return
+    # If video started but anything after that failed,
+    # shut it down so RECORD remains atomic.
+    if ($script:videoRecording) {
+        try {
+            Stop-NovaVideoCapture
+        }
+        catch {
+        }
     }
+
+    # Audio may also have partially started.
+    try {
+        $script:recorder.Stop()
+    }
+    catch {
+    }
+
+    [System.Windows.Forms.MessageBox]::Show(
+        $_.Exception.Message,
+        "Nova Recorder",
+        [System.Windows.Forms.MessageBoxButtons]::OK,
+        [System.Windows.Forms.MessageBoxIcon]::Error
+    )
+
+    $statusLabel.Text = "READY"
+    $statusLabel.ForeColor = [System.Drawing.Color]::LightGray
+
+    return
+}
 
 
     $script:recording = $true
@@ -3605,6 +3747,22 @@ $stopButton.Add_Click({
     $script:recording = $false
     $script:recordingStart = $null
 
+    if (
+        (Test-Path -LiteralPath $script:currentVideoFile) -and
+        (Test-Path -LiteralPath $script:currentFile)
+    ) {
+        try {
+            $combinedPath =
+                New-NovaCombinedMp4 `
+                    -SessionFolder $sessionFolder `
+                    -AudioDelayMs 300
+
+            Write-Host "Combined MP4 created: $combinedPath"
+        }
+        catch {
+            Write-Host "Combined MP4 failed: $($_.Exception.Message)"
+        }
+    }
 
     $headMeter.Level = 0
     $headMeter.Clipping = $false
@@ -3860,7 +4018,7 @@ function New-NovaCombinedMp4 {
         [Parameter(Mandatory = $true)]
         [string]$SessionFolder,
 
-        [double]$AudioOffsetSeconds = 0
+        [int]$AudioDelayMs = 300
     )
 
     $audioPath = Join-Path $SessionFolder "audio.wav"
@@ -3875,14 +4033,8 @@ function New-NovaCombinedMp4 {
         throw "Video source not found: $videoPath"
     }
 
-    $audioOffsetText =
-        $AudioOffsetSeconds.ToString(
-            '0.0000',
-            [System.Globalization.CultureInfo]::InvariantCulture
-        )
-
     $audioFilter =
-        "atrim=start=$audioOffsetText,asetpts=PTS-STARTPTS,apad"
+        "adelay=$AudioDelayMs|$AudioDelayMs,apad"
 
     $arguments = @(
         '-hide_banner'
