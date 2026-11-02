@@ -1,4 +1,4 @@
-﻿Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 # =====================================================================
@@ -893,6 +893,172 @@ public class NovaFfmpegReadyMonitor : IDisposable
         catch
         {
             // Readiness telemetry must never crash recording.
+        }
+    }
+
+    public void Dispose()
+    {
+        stopping = true;
+    }
+}
+
+public class NovaPreviewReader : IDisposable
+{
+    private System.Diagnostics.Process process;
+    private System.Windows.Forms.PictureBox pictureBox;
+    private System.Threading.Thread readerThread;
+    private volatile bool stopping = false;
+
+    public NovaPreviewReader(
+        System.Diagnostics.Process ffmpegProcess,
+        System.Windows.Forms.PictureBox targetPictureBox
+    )
+    {
+        process = ffmpegProcess;
+        pictureBox = targetPictureBox;
+    }
+
+    public void Start()
+    {
+        stopping = false;
+
+        readerThread =
+            new System.Threading.Thread(ReadLoop);
+
+        readerThread.IsBackground = true;
+        readerThread.Start();
+    }
+
+    private void ReadLoop()
+    {
+        System.IO.Stream stream =
+            process.StandardOutput.BaseStream;
+
+        System.IO.MemoryStream frame =
+            new System.IO.MemoryStream();
+
+        byte[] buffer = new byte[65536];
+
+        bool insideJpeg = false;
+        int previous = -1;
+
+        try
+        {
+            while (!stopping && !process.HasExited)
+            {
+                int bytesRead =
+                    stream.Read(
+                        buffer,
+                        0,
+                        buffer.Length
+                    );
+
+                if (bytesRead <= 0)
+                {
+                    break;
+                }
+
+                for (int i = 0; i < bytesRead; i++)
+                {
+                    int current = buffer[i];
+
+                    if (!insideJpeg)
+                    {
+                        if (
+                            previous == 0xFF &&
+                            current == 0xD8
+                        )
+                        {
+                            frame.SetLength(0);
+
+                            frame.WriteByte(0xFF);
+                            frame.WriteByte(0xD8);
+
+                            insideJpeg = true;
+                        }
+                    }
+                    else
+                    {
+                        frame.WriteByte(
+                            (byte)current
+                        );
+
+                        if (
+                            previous == 0xFF &&
+                            current == 0xD9
+                        )
+                        {
+                            byte[] jpegBytes =
+                                frame.ToArray();
+
+                            PublishFrame(jpegBytes);
+
+                            insideJpeg = false;
+                            frame.SetLength(0);
+                        }
+                    }
+
+                    previous = current;
+                }
+            }
+        }
+        catch
+        {
+            // Preview failure must never crash NOVA Recorder.
+        }
+        finally
+        {
+            frame.Dispose();
+        }
+    }
+
+    private void PublishFrame(byte[] jpegBytes)
+    {
+        try
+        {
+            System.Drawing.Bitmap bitmap;
+
+            using (
+                System.IO.MemoryStream memory =
+                    new System.IO.MemoryStream(jpegBytes)
+            )
+            using (
+                System.Drawing.Image image =
+                    System.Drawing.Image.FromStream(memory)
+            )
+            {
+                bitmap =
+                    new System.Drawing.Bitmap(image);
+            }
+
+            if (
+                pictureBox == null ||
+                pictureBox.IsDisposed ||
+                !pictureBox.IsHandleCreated
+            )
+            {
+                bitmap.Dispose();
+                return;
+            }
+
+            pictureBox.BeginInvoke(
+                (System.Windows.Forms.MethodInvoker)delegate
+                {
+                    System.Drawing.Image oldImage =
+                        pictureBox.Image;
+
+                    pictureBox.Image = bitmap;
+
+                    if (oldImage != null)
+                    {
+                        oldImage.Dispose();
+                    }
+                }
+            );
+        }
+        catch
+        {
+            // Ignore malformed/incomplete preview frames.
         }
     }
 
@@ -2434,6 +2600,9 @@ $script:currentFile = $null
 $script:currentVideoFile = $null
 $script:videoProcess = $null
 $script:videoRecording = $false
+$script:previewReader = $null
+$script:recordingPreviewReader = $null
+$script:previewRunning = $false
 
 
 # =====================================================================
@@ -2664,12 +2833,18 @@ function Start-NovaVideoCapture {
         '-framerate', $frameRate
         '-vcodec', $codec
         '-i', ('video="' + $DeviceName + '"')
-        '-c:v', 'copy'
         '-progress', 'pipe:2'
         '-stats_period', '0.05'
         '-nostats'
         '-y'
+        '-map', '0:v:0'
+        '-c:v', 'copy'
+        '-f', 'avi'
         ('"' + $OutputPath + '"')
+        '-map', '0:v:0'
+        '-c:v', 'copy'
+        '-f', 'image2pipe'
+        'pipe:1'
     ) -join ' '
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -2679,6 +2854,7 @@ function Start-NovaVideoCapture {
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardInput = $true
     $startInfo.RedirectStandardError = $true
+    $startInfo.RedirectStandardOutput = $true
 
     $process = New-Object System.Diagnostics.Process
     $process.StartInfo = $startInfo
@@ -2692,12 +2868,21 @@ function Start-NovaVideoCapture {
 
     $script:videoReadyMonitor.Start()
 
+    # Drain the second MJPEG output immediately so stdout cannot block AVI writing.
+    $script:recordingPreviewReader =
+        New-Object NovaPreviewReader -ArgumentList $process, $previewBox
+    $script:recordingPreviewReader.Start()
+
     # Give DirectShow a moment to bind the camera. If FFmpeg exits
     # immediately, surface that as a failed start instead of pretending
     # video is recording.
     Start-Sleep -Milliseconds 350
 
     if ($process.HasExited) {
+        if ($null -ne $script:recordingPreviewReader) {
+            $script:recordingPreviewReader.Dispose()
+            $script:recordingPreviewReader = $null
+        }
         $exitCode = $process.ExitCode
 
         if ($null -ne $script:videoReadyMonitor) {
@@ -2713,6 +2898,100 @@ function Start-NovaVideoCapture {
     $script:videoRecording = $true
 }
 
+function Start-NovaVideoPreview {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DeviceName,
+
+        [Parameter(Mandatory = $true)]
+        [object]$Mode
+    )
+
+    if ($script:previewRunning) {
+        return
+    }
+
+    $videoSize = "$($Mode.Width)x$($Mode.Height)"
+    $frameRate = [string]$Mode.MaxFps
+    $codec     = [string]$Mode.Codec
+
+    $arguments = @(
+        '-hide_banner'
+        '-loglevel', 'error'
+        '-f', 'dshow'
+        '-rtbufsize', '128M'
+        '-video_size', $videoSize
+        '-framerate', $frameRate
+        '-vcodec', $codec
+        '-i', ('video="' + $DeviceName + '"')
+        '-f', 'image2pipe'
+        '-c:v', 'mjpeg'
+        'pipe:1'
+    ) -join ' '
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $ffmpegPath
+    $startInfo.Arguments = $arguments
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+
+    if (-not $process.Start()) {
+        throw "FFmpeg could not start camera preview."
+    }
+
+    $script:previewProcess = $process
+    $script:previewRunning = $true
+
+    $script:previewReader =
+        New-Object NovaPreviewReader -ArgumentList $process, $previewBox
+
+    $script:previewReader.Start()
+}
+
+function Stop-NovaVideoPreview {
+
+    if ($null -ne $script:previewReader) {
+        $script:previewReader.Dispose()
+        $script:previewReader = $null
+    }
+
+    $process = $script:previewProcess
+
+    Write-Host "Stopping preview..."
+
+    if ($null -ne $process) {
+        Write-Host "Preview PID: $($process.Id)"
+    }
+    else {
+        Write-Host "Preview process is null."
+    }
+
+    try {
+        if ($null -ne $process -and -not $process.HasExited) {
+
+            $process.Kill()
+
+            if (-not $process.WaitForExit(12000)) {
+                throw "Preview FFmpeg did not exit cleanly."
+            }
+
+            Write-Host "Preview HasExited: $($process.HasExited)"
+        }
+    }
+    finally {
+        if ($null -ne $process) {
+            $process.Dispose()
+        }
+
+        $script:previewProcess = $null
+        $script:previewRunning = $false
+    }
+}
 
 function Stop-NovaVideoCapture {
 
@@ -2736,6 +3015,11 @@ function Stop-NovaVideoCapture {
         }
     }
     finally {
+
+        if ($null -ne $script:recordingPreviewReader) {
+            $script:recordingPreviewReader.Dispose()
+            $script:recordingPreviewReader = $null
+        }
 
         if ($null -ne $script:videoReadyMonitor) {
             $script:videoReadyMonitor.Dispose()
@@ -2784,7 +3068,7 @@ $form = New-Object System.Windows.Forms.Form
 
 $form.Text = "Nova Recorder v2.2"
 
-$form.Size = New-Object System.Drawing.Size(540, 755)
+$form.Size = New-Object System.Drawing.Size(580, 940)
 
 $form.StartPosition = "CenterScreen"
 
@@ -2837,7 +3121,7 @@ $micLabel.Font = New-Object System.Drawing.Font(
 
 $micLabel.AutoSize = $true
 
-$micLabel.Location = New-Object System.Drawing.Point(45, 80)
+$micLabel.Location = New-Object System.Drawing.Point(50, 80)
 
 $form.Controls.Add($micLabel)
 
@@ -2850,9 +3134,9 @@ $deviceCombo = New-Object System.Windows.Forms.ComboBox
 
 $deviceCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
 
-$deviceCombo.Size = New-Object System.Drawing.Size(340, 30)
+$deviceCombo.Size = New-Object System.Drawing.Size(350, 30)
 
-$deviceCombo.Location = New-Object System.Drawing.Point(45, 104)
+$deviceCombo.Location = New-Object System.Drawing.Point(50, 104)
 
 $deviceCombo.Font = New-Object System.Drawing.Font(
     "Segoe UI",
@@ -2872,7 +3156,7 @@ $refreshButton.Text = "Refresh"
 
 $refreshButton.Size = New-Object System.Drawing.Size(85, 29)
 
-$refreshButton.Location = New-Object System.Drawing.Point(400, 103)
+$refreshButton.Location = New-Object System.Drawing.Point(415, 103)
 
 $form.Controls.Add($refreshButton)
 
@@ -2886,13 +3170,13 @@ $videoLabel.Text = "Video source"
 $videoLabel.ForeColor = [System.Drawing.Color]::Gainsboro
 $videoLabel.Font = New-Object System.Drawing.Font("Segoe UI", 10)
 $videoLabel.AutoSize = $true
-$videoLabel.Location = New-Object System.Drawing.Point(45, 145)
+$videoLabel.Location = New-Object System.Drawing.Point(50, 145)
 $form.Controls.Add($videoLabel)
 
 $videoCombo = New-Object System.Windows.Forms.ComboBox
 $videoCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
-$videoCombo.Size = New-Object System.Drawing.Size(340, 30)
-$videoCombo.Location = New-Object System.Drawing.Point(45, 169)
+$videoCombo.Size = New-Object System.Drawing.Size(350, 30)
+$videoCombo.Location = New-Object System.Drawing.Point(50, 169)
 $videoCombo.Font = New-Object System.Drawing.Font("Segoe UI", 10)
 $form.Controls.Add($videoCombo)
 
@@ -2900,20 +3184,35 @@ $videoCheckBox = New-Object System.Windows.Forms.CheckBox
 $videoCheckBox.Text = "Capture"
 $videoCheckBox.ForeColor = [System.Drawing.Color]::Gainsboro
 $videoCheckBox.AutoSize = $true
-$videoCheckBox.Location = New-Object System.Drawing.Point(400, 172)
+$videoCheckBox.Location = New-Object System.Drawing.Point(415, 172)
 $videoCheckBox.Checked = $true
 $form.Controls.Add($videoCheckBox)
 
 $videoModeLabel = New-Object System.Windows.Forms.Label
 $videoModeLabel.Text = "Video mode"
-$videoModeLabel.Location = New-Object System.Drawing.Point(48, 225)
+$videoModeLabel.Location = New-Object System.Drawing.Point(50, 210)
 $videoModeLabel.Size = New-Object System.Drawing.Size(100, 20)
 $videoModeLabel.ForeColor = [System.Drawing.Color]::White
 $form.Controls.Add($videoModeLabel)
 
+$previewPanel = New-Object System.Windows.Forms.Panel
+$previewPanel.Size = New-Object System.Drawing.Size(350, 180)
+$previewPanel.Location = New-Object System.Drawing.Point(80, 280)
+$previewPanel.BackColor = [System.Drawing.Color]::FromArgb(18, 20, 24)
+$previewPanel.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+
+$form.Controls.Add($previewPanel)
+
+$previewBox = New-Object System.Windows.Forms.PictureBox
+$previewBox.Dock = [System.Windows.Forms.DockStyle]::Fill
+$previewBox.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+$previewBox.BackColor = [System.Drawing.Color]::Black
+
+$previewPanel.Controls.Add($previewBox)
+
 $videoModeCombo = New-Object System.Windows.Forms.ComboBox
-$videoModeCombo.Location = New-Object System.Drawing.Point(48, 245)
-$videoModeCombo.Size = New-Object System.Drawing.Size(338, 24)
+$videoModeCombo.Location = New-Object System.Drawing.Point(50, 234)
+$videoModeCombo.Size = New-Object System.Drawing.Size(350, 24)
 $videoModeCombo.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
 $videoModeCombo.DisplayMember = "Display"
 $form.Controls.Add($videoModeCombo)
@@ -2940,7 +3239,7 @@ $levelLabel.Font = New-Object System.Drawing.Font(
 
 $levelLabel.AutoSize = $true
 
-$levelLabel.Location = New-Object System.Drawing.Point(45, 220)
+$levelLabel.Location = New-Object System.Drawing.Point(240, 500)
 
 $form.Controls.Add($levelLabel)
 
@@ -2963,20 +3262,20 @@ $clipLabel.Font = New-Object System.Drawing.Font(
 
 $clipLabel.AutoSize = $true
 
-$clipLabel.Location = New-Object System.Drawing.Point(445, 222)
+$clipLabel.Location = New-Object System.Drawing.Point(472, 485)
 
 $form.Controls.Add($clipLabel)
 
 
 # =====================================================================
-# Input level bar
+# Input level bar (HEAD)
 # =====================================================================
 
 $headMeter = New-Object CyberHeadMeter
 
-$headMeter.Size = New-Object System.Drawing.Size(180, 180)
+$headMeter.Size = New-Object System.Drawing.Size(120, 120)
 
-$headMeter.Location = New-Object System.Drawing.Point(170, 240)
+$headMeter.Location = New-Object System.Drawing.Point(423, 500)
 
 $headMeter.Level = 0
 
@@ -3002,7 +3301,7 @@ $gainTitleLabel.Font = New-Object System.Drawing.Font(
 
 $gainTitleLabel.AutoSize = $true
 
-$gainTitleLabel.Location = New-Object System.Drawing.Point(45, 435)
+$gainTitleLabel.Location = New-Object System.Drawing.Point(45, 520)
 
 $form.Controls.Add($gainTitleLabel)
 
@@ -3025,7 +3324,7 @@ $gainValueLabel.Font = New-Object System.Drawing.Font(
 
 $gainValueLabel.AutoSize = $true
 
-$gainValueLabel.Location = New-Object System.Drawing.Point(430, 435)
+$gainValueLabel.Location = New-Object System.Drawing.Point(375, 500)
 
 $form.Controls.Add($gainValueLabel)
 
@@ -3048,9 +3347,9 @@ $gainSlider.SmallChange = 1
 
 $gainSlider.LargeChange = 4
 
-$gainSlider.Size = New-Object System.Drawing.Size(390, 38)
+$gainSlider.Size = New-Object System.Drawing.Size(370, 38)
 
-$gainSlider.Location = New-Object System.Drawing.Point(40, 447)
+$gainSlider.Location = New-Object System.Drawing.Point(40, 540)
 
 $form.Controls.Add($gainSlider)
 
@@ -3061,7 +3360,7 @@ $gainZeroLabel = New-Object System.Windows.Forms.Label
 $gainZeroLabel.Text = "0"
 $gainZeroLabel.ForeColor = [System.Drawing.Color]::Gray
 $gainZeroLabel.AutoSize = $true
-$gainZeroLabel.Location = New-Object System.Drawing.Point(48, 500)
+$gainZeroLabel.Location = New-Object System.Drawing.Point(48, 590)
 $form.Controls.Add($gainZeroLabel)
 
 
@@ -3069,7 +3368,7 @@ $gainSixLabel = New-Object System.Windows.Forms.Label
 $gainSixLabel.Text = "+8"
 $gainSixLabel.ForeColor = [System.Drawing.Color]::Gray
 $gainSixLabel.AutoSize = $true
-$gainSixLabel.Location = New-Object System.Drawing.Point(139, 500)
+$gainSixLabel.Location = New-Object System.Drawing.Point(128, 590)
 $form.Controls.Add($gainSixLabel)
 
 
@@ -3077,24 +3376,24 @@ $gainTwelveLabel = New-Object System.Windows.Forms.Label
 $gainTwelveLabel.Text = "+16"
 $gainTwelveLabel.ForeColor = [System.Drawing.Color]::Gray
 $gainTwelveLabel.AutoSize = $true
-$gainTwelveLabel.Location = New-Object System.Drawing.Point(230, 500)
+$gainTwelveLabel.Location = New-Object System.Drawing.Point(212, 590)
 $form.Controls.Add($gainTwelveLabel)
 
 
 $gainEighteenLabel = New-Object System.Windows.Forms.Label
-$gainEighteenLabel.Text = "+32 dB"
+$gainEighteenLabel.Text = "+24"
 $gainEighteenLabel.ForeColor = [System.Drawing.Color]::Gray
 $gainEighteenLabel.AutoSize = $true
-$gainEighteenLabel.Location = New-Object System.Drawing.Point(318, 500)
+$gainEighteenLabel.Location = New-Object System.Drawing.Point(296, 590)
 $form.Controls.Add($gainEighteenLabel)
 
 
 $gainTwentyFourLabel = New-Object System.Windows.Forms.Label
 
-$gainTwentyFourLabel.Text = "+24"
+$gainTwentyFourLabel.Text = "+32 dB"
 $gainTwentyFourLabel.ForeColor = [System.Drawing.Color]::Gray
 $gainTwentyFourLabel.AutoSize = $true
-$gainTwentyFourLabel.Location = New-Object System.Drawing.Point(405, 500)
+$gainTwentyFourLabel.Location = New-Object System.Drawing.Point(381, 590)
 
 $form.Controls.Add($gainTwentyFourLabel)
 
@@ -3121,7 +3420,7 @@ $statusLabel.Font = New-Object System.Drawing.Font(
 
 $statusLabel.AutoSize = $true
 
-$statusLabel.Location = New-Object System.Drawing.Point(200, 530)
+$statusLabel.Location = New-Object System.Drawing.Point(230, 820)
 
 $form.Controls.Add($statusLabel)
 
@@ -3144,7 +3443,7 @@ $timerLabel.Font = New-Object System.Drawing.Font(
 
 $timerLabel.AutoSize = $true
 
-$timerLabel.Location = New-Object System.Drawing.Point(185, 560)
+$timerLabel.Location = New-Object System.Drawing.Point(185, 640)
 
 $form.Controls.Add($timerLabel)
 
@@ -3159,7 +3458,7 @@ $recordButton.Text = "RECORD"
 
 $recordButton.Size = New-Object System.Drawing.Size(145, 48)
 
-$recordButton.Location = New-Object System.Drawing.Point(95, 615)
+$recordButton.Location = New-Object System.Drawing.Point(105, 695)
 
 $recordButton.Font = New-Object System.Drawing.Font(
     "Segoe UI",
@@ -3190,7 +3489,7 @@ $stopButton.Text = "STOP"
 
 $stopButton.Size = New-Object System.Drawing.Size(145, 48)
 
-$stopButton.Location = New-Object System.Drawing.Point(285, 615)
+$stopButton.Location = New-Object System.Drawing.Point(300, 695)
 
 $stopButton.Font = New-Object System.Drawing.Font(
     "Segoe UI",
@@ -3223,7 +3522,7 @@ $folderButton.Text = "Open Recordings Folder"
 
 $folderButton.Size = New-Object System.Drawing.Size(205, 30)
 
-$folderButton.Location = New-Object System.Drawing.Point(160, 675)
+$folderButton.Location = New-Object System.Drawing.Point(175, 755)
 
 $form.Controls.Add($folderButton)
 
@@ -3567,6 +3866,12 @@ $recordButton.Add_Click({
 
     if ($videoCheckBox.Checked) {
 
+        Stop-NovaVideoPreview
+
+        # Give DirectShow time to fully release the camera
+        # before the recording process tries to claim it.
+        Start-Sleep -Milliseconds 3000
+
         $selectedVideoMode = $videoModeCombo.SelectedItem
 
         if ($null -eq $selectedVideoMode) {
@@ -3583,6 +3888,9 @@ $recordButton.Add_Click({
             -OutputPath $script:currentVideoFile `
             -Mode $selectedVideoMode
 
+        Write-Host "Recording FFmpeg PID: $($script:videoProcess.Id)"
+        Write-Host "Recording FFmpeg HasExited: $($script:videoProcess.HasExited)"
+
         # Wait until FFmpeg confirms that the camera is
         # actually producing video frames.
         $videoReadyDeadline = (Get-Date).AddSeconds(15)
@@ -3591,7 +3899,21 @@ $recordButton.Add_Click({
             $null -ne $script:videoReadyMonitor -and
             -not $script:videoReadyMonitor.VideoReady
         ) {
+            Write-Host `
+                "Waiting for video ready... Ready=$($script:videoReadyMonitor.VideoReady) HasExited=$($script:videoProcess.HasExited)"
+
             if ((Get-Date) -ge $videoReadyDeadline) {
+
+                $videoBytes = -1
+
+                if (Test-Path -LiteralPath $script:currentVideoFile) {
+                    $videoBytes =
+                        (Get-Item -LiteralPath $script:currentVideoFile).Length
+                }
+
+                Write-Host `
+                    "VIDEO TIMEOUT: Ready=$($script:videoReadyMonitor.VideoReady) HasExited=$($script:videoProcess.HasExited) VideoBytes=$videoBytes"
+
                 throw "Camera did not begin producing video within 15 seconds."
             }
 
@@ -3648,6 +3970,21 @@ catch {
 
     $statusLabel.Text = "READY"
     $statusLabel.ForeColor = [System.Drawing.Color]::LightGray
+
+    if (
+        $videoCheckBox.Checked -and
+        $null -ne $videoCombo.SelectedItem -and
+        $null -ne $videoModeCombo.SelectedItem
+    ) {
+        try {
+            Start-NovaVideoPreview `
+                -DeviceName ([string]$videoCombo.SelectedItem) `
+                -Mode $videoModeCombo.SelectedItem
+        }
+        catch {
+            Write-Host "Camera preview restart after failed recording start failed: $($_.Exception.Message)"
+        }
+    }
 
     return
 }
@@ -3761,6 +4098,22 @@ $stopButton.Add_Click({
         }
         catch {
             Write-Host "Combined MP4 failed: $($_.Exception.Message)"
+        }
+    }
+
+    # Restart idle camera preview after recording is fully finished
+    if (
+        $videoCheckBox.Checked -and
+        $null -ne $videoCombo.SelectedItem -and
+        $null -ne $videoModeCombo.SelectedItem
+    ) {
+        try {
+            Start-NovaVideoPreview `
+                -DeviceName ([string]$videoCombo.SelectedItem) `
+                -Mode $videoModeCombo.SelectedItem
+        }
+        catch {
+            Write-Host "Camera preview restart failed: $($_.Exception.Message)"
         }
     }
 
@@ -4101,5 +4454,23 @@ Start-LivePreview
 # =====================================================================
 # END audio device-name diagnostics
 # =====================================================================
+
+$form.Add_Shown({
+
+    if (
+        $videoCheckBox.Checked -and
+        $null -ne $videoCombo.SelectedItem -and
+        $null -ne $videoModeCombo.SelectedItem
+    ) {
+        try {
+            Start-NovaVideoPreview `
+                -DeviceName ([string]$videoCombo.SelectedItem) `
+                -Mode $videoModeCombo.SelectedItem
+        }
+        catch {
+            Write-Host "Camera preview failed: $($_.Exception.Message)"
+        }
+    }
+})
 
 [void]$form.ShowDialog()
