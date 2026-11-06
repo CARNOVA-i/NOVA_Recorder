@@ -119,3 +119,81 @@ function Start-NovaRecording {
         throw
     }
 }
+# WP-01B.2b-I2B: UI-independent normal STOP/finalization orchestration.
+# Window-closing behavior is intentionally unchanged in this work package.
+function Stop-NovaRecording {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$AudioDevice,
+
+        [Parameter(Mandatory = $true)]
+        [double]$GainDb,
+
+        [object]$VideoDevice
+    )
+
+    if (-not $script:recording) {
+        throw "No recording is currently in progress."
+    }
+
+    $videoStopError = $null
+    $audioStopError = $null
+
+    if ($script:videoRecording) {
+        try {
+            Stop-NovaVideoCapture
+        }
+        catch {
+            $videoStopError = $_.Exception.Message
+        }
+    }
+
+    try {
+        $script:recorder.Stop()
+
+        # Retain existing diagnostic output until a separate cleanup work package.
+        Write-Host "First audio buffer timestamp: $($script:recorder.FirstBufferTimestamp)"
+    }
+    catch {
+        $audioStopError = $_.Exception.Message
+    }
+
+    $sessionFolder = Split-Path -Parent $script:currentFile
+    $recordingEnd = Get-Date
+
+    Write-NovaSessionMetadata `
+        -SessionFolder $sessionFolder `
+        -AudioDevice $AudioDevice `
+        -GainDb $GainDb `
+        -VideoDevice $VideoDevice `
+        -VideoMode $script:currentVideoMode `
+        -Started $script:recordingStart `
+        -Ended $recordingEnd
+
+    $script:recording = $false
+    $script:recordingStart = $null
+
+    $combinedPath = $null
+    if (
+        (Test-Path -LiteralPath $script:currentVideoFile) -and
+        (Test-Path -LiteralPath $script:currentFile)
+    ) {
+        try {
+            $combinedPath = New-NovaCombinedMp4 `
+                -SessionFolder $sessionFolder `
+                -AudioDelayMs 300
+
+            Write-Host "Combined MP4 created: $combinedPath"
+        }
+        catch {
+            Write-Host "Combined MP4 failed: $($_.Exception.Message)"
+        }
+    }
+
+    return [pscustomobject]@{
+        VideoStopError = $videoStopError
+        AudioStopError = $audioStopError
+        SessionFolder = $sessionFolder
+        CombinedPath = $combinedPath
+    }
+}

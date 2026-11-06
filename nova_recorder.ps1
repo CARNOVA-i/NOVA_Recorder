@@ -979,65 +979,21 @@ $stopButton.Add_Click({
     $uiTimer.Stop()
 
 
-    $videoStopError = $null
+    # Controller owns STOP, metadata and MP4 finalization. UI owns presentation.
+    $stopResult = Stop-NovaRecording `
+        -AudioDevice $deviceCombo.SelectedItem `
+        -GainDb ([double]$gainSlider.Value) `
+        -VideoDevice $videoCombo.SelectedItem
 
-    if ($script:videoRecording) {
-        try {
-            Stop-NovaVideoCapture
-        }
-        catch {
-            $videoStopError = $_.Exception.Message
-        }
-    }
+    $videoStopError = $stopResult.VideoStopError
 
-    try {
-
-        $script:recorder.Stop()
-
-        # Temporary debug output
-        Write-Host "First audio buffer timestamp: $($script:recorder.FirstBufferTimestamp)"
-    }
-    catch {
-
+    if ($null -ne $stopResult.AudioStopError) {
         [System.Windows.Forms.MessageBox]::Show(
-            $_.Exception.Message,
+            $stopResult.AudioStopError,
             "Nova Recorder",
             [System.Windows.Forms.MessageBoxButtons]::OK,
             [System.Windows.Forms.MessageBoxIcon]::Error
         )
-    }
-
-    $sessionFolder = Split-Path -Parent $script:currentFile
-
-    $recordingEnd = Get-Date
-
-    Write-NovaSessionMetadata `
-        -SessionFolder $sessionFolder `
-        -AudioDevice $deviceCombo.SelectedItem `
-        -GainDb ([double]$gainSlider.Value) `
-        -VideoDevice $videoCombo.SelectedItem `
-        -VideoMode $script:currentVideoMode `
-        -Started $script:recordingStart `
-        -Ended $recordingEnd
-
-    $script:recording = $false
-    $script:recordingStart = $null
-
-    if (
-        (Test-Path -LiteralPath $script:currentVideoFile) -and
-        (Test-Path -LiteralPath $script:currentFile)
-    ) {
-        try {
-            $combinedPath =
-                New-NovaCombinedMp4 `
-                    -SessionFolder $sessionFolder `
-                    -AudioDelayMs 300
-
-            Write-Host "Combined MP4 created: $combinedPath"
-        }
-        catch {
-            Write-Host "Combined MP4 failed: $($_.Exception.Message)"
-        }
     }
 
     # Restart idle camera preview after recording is fully finished
