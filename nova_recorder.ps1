@@ -53,6 +53,8 @@ $script:videoRecording = $false
 $script:previewReader = $null
 $script:recordingPreviewReader = $null
 $script:previewRunning = $false
+$script:recordingStarting = $false
+$script:recordingStopping = $false
 
 
 # =====================================================================
@@ -853,7 +855,7 @@ $refreshButton.Add_Click({
 
 $recordButton.Add_Click({
 
-    if ($script:recording) {
+    if ($script:recording -or $script:recordingStarting -or $script:recordingStopping) {
         return
     }
 
@@ -885,6 +887,7 @@ $recordButton.Add_Click({
         return
     }
 
+    $script:recordingStarting = $true
     try {
         Start-NovaRecording `
             -AudioDevice $device `
@@ -926,6 +929,9 @@ $recordButton.Add_Click({
             }
         }
         return
+    }
+    finally {
+        $script:recordingStarting = $false
     }
 
 
@@ -971,7 +977,7 @@ $recordButton.Add_Click({
 
 $stopButton.Add_Click({
 
-    if (-not $script:recording) {
+    if (-not $script:recording -or $script:recordingStarting -or $script:recordingStopping) {
         return
     }
 
@@ -980,10 +986,25 @@ $stopButton.Add_Click({
 
 
     # Controller owns STOP, metadata and MP4 finalization. UI owns presentation.
-    $stopResult = Stop-NovaRecording `
-        -AudioDevice $deviceCombo.SelectedItem `
-        -GainDb ([double]$gainSlider.Value) `
-        -VideoDevice $videoCombo.SelectedItem
+    $script:recordingStopping = $true
+    try {
+        $stopResult = Stop-NovaRecording `
+            -AudioDevice $deviceCombo.SelectedItem `
+            -GainDb ([double]$gainSlider.Value) `
+            -VideoDevice $videoCombo.SelectedItem
+    }
+    catch {
+        [System.Windows.Forms.MessageBox]::Show(
+            "Recording finalization did not complete: $($_.Exception.Message)`n`nCheck the session's raw files before closing.",
+            "Nova Recorder",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        )
+        return
+    }
+    finally {
+        $script:recordingStopping = $false
+    }
 
     $videoStopError = $stopResult.VideoStopError
 
@@ -1132,71 +1153,88 @@ $folderButton.Add_Click({
 # =====================================================================
 
 $form.Add_FormClosing({
+    $closingArgs = $_
+    # DoEvents() runs during camera startup. Never close while the controller
+    # is starting or finalizing a capture, or it could dispose live resources.
+    if ($script:recordingStarting -or $script:recordingStopping) {
+        $closingArgs.Cancel = $true
+        [System.Windows.Forms.MessageBox]::Show(
+            "NOVA is starting or finalizing a recording. Please finish that operation before closing.",
+            "Nova Recorder",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Information
+        )
+        return
+    }
 
     if ($script:recording) {
-
+        # No discard-on-close path: Cancel leaves the recording running.
         $answer = [System.Windows.Forms.MessageBox]::Show(
-            "A recording is currently running.`n`nStop and save it before closing?",
+            "A recording is currently running.`n`nStop, finalize, and save it before closing?`n`nCancel keeps NOVA open and recording.",
             "Nova Recorder",
-            [System.Windows.Forms.MessageBoxButtons]::YesNoCancel,
+            [System.Windows.Forms.MessageBoxButtons]::OKCancel,
             [System.Windows.Forms.MessageBoxIcon]::Question
         )
 
-
-        if ($answer -eq [System.Windows.Forms.DialogResult]::Cancel) {
-
-            $_.Cancel = $true
-
+        if ($answer -ne [System.Windows.Forms.DialogResult]::OK) {
+            $closingArgs.Cancel = $true
             return
         }
 
+        $script:recordingStopping = $true
+        try {
+            $uiTimer.Stop()
+            $stopResult = Stop-NovaRecording `
+                -AudioDevice $deviceCombo.SelectedItem `
+                -GainDb ([double]$gainSlider.Value) `
+                -VideoDevice $videoCombo.SelectedItem
 
-        if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
-
-            try {
-
-                $uiTimer.Stop()
-
-                if ($script:videoRecording) {
-                    Stop-NovaVideoCapture
-                }
-
-                $script:recorder.Stop()
-
-                $script:recording = $false
+            if ($null -ne $stopResult.VideoStopError -or
+                $null -ne $stopResult.AudioStopError) {
+                throw "Capture shutdown reported an error. Video: $($stopResult.VideoStopError); Audio: $($stopResult.AudioStopError). Raw files may be recoverable."
             }
-            catch {
 
-                [System.Windows.Forms.MessageBox]::Show(
-                    $_.Exception.Message,
-                    "Nova Recorder",
-                    [System.Windows.Forms.MessageBoxButtons]::OK,
-                    [System.Windows.Forms.MessageBoxIcon]::Error
-                )
-
-                $_.Cancel = $true
-
-                return
+            # For a video session, a missing MP4 is a finalization failure.
+            # Avoid silently closing when muxing did not produce its output.
+            if (-not [string]::IsNullOrEmpty($script:currentVideoFile) -and
+                (Test-Path -LiteralPath $script:currentVideoFile) -and
+                $null -eq $stopResult.CombinedPath) {
+                throw "The combined MP4 was not created. Raw WAV and AVI may still be available in $($stopResult.SessionFolder)."
             }
+        }
+        catch {
+            $closingArgs.Cancel = $true
+            [System.Windows.Forms.MessageBox]::Show(
+                "Recording shutdown needs attention: $($_.Exception.Message)`n`nNOVA will remain open. Check the raw session files before retrying or exiting.",
+                "Nova Recorder",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Error
+            )
+            return
+        }
+        finally {
+            $script:recordingStopping = $false
         }
     }
 
-
+    # When idle, the preview FFmpeg process still owns the webcam.
+    # Release it explicitly before the form destroys its PictureBox.
     try {
-        if ($script:videoRecording) {
-            Stop-NovaVideoCapture
-        }
-    }
-    catch {
-    }
-
-    try {
+        Stop-NovaVideoPreview
+        Stop-LivePreview
+        $uiTimer.Stop()
         $script:recorder.Dispose()
     }
     catch {
+        $closingArgs.Cancel = $true
+        [System.Windows.Forms.MessageBox]::Show(
+            "NOVA could not finish cleaning up recording resources: $($_.Exception.Message)",
+            "Nova Recorder",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        )
     }
 })
-
 
 # =====================================================================
 # Nova Combined Mp4

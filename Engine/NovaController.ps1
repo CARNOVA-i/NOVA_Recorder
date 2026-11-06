@@ -175,7 +175,9 @@ function Stop-NovaRecording {
 
     $combinedPath = $null
     if (
+        -not [string]::IsNullOrWhiteSpace($script:currentVideoFile) -and
         (Test-Path -LiteralPath $script:currentVideoFile) -and
+        -not [string]::IsNullOrWhiteSpace($script:currentFile) -and
         (Test-Path -LiteralPath $script:currentFile)
     ) {
         try {
