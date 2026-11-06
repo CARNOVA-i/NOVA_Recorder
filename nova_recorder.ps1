@@ -68,6 +68,9 @@ $script:previewRunning = $false
 . (Join-Path $PSScriptRoot "Engine\NovaVideo.ps1")
 
 
+# WP-01B.2b-I2A: controller startup orchestration (STOP remains in WinForms).
+. (Join-Path $PSScriptRoot "Engine\NovaController.ps1")
+
 function Update-NovaVideoModes {
     $videoModeCombo.Items.Clear()
 
@@ -882,146 +885,48 @@ $recordButton.Add_Click({
         return
     }
 
-    $script:currentFile = Get-NewRecordingPath
-    $script:currentVideoFile = $null
-
-    if ($videoCheckBox.Checked) {
-        $script:currentVideoFile = Get-VideoRecordingPath -AudioPath $script:currentFile
-    }
-
-
     try {
-
-    $script:recorder.SetGainDb(
-        [double]$gainSlider.Value
-    )
-
-    if ($videoCheckBox.Checked) {
-
-        Stop-NovaVideoPreview
-
-        # Give DirectShow time to fully release the camera
-        # before the recording process tries to claim it.
-        Start-Sleep -Milliseconds 3000
-
-        $selectedVideoMode = $videoModeCombo.SelectedItem
-
-        if ($null -eq $selectedVideoMode) {
-            throw "No video mode is selected."
-        }
-
-        $script:currentVideoMode = $selectedVideoMode
-
-        $statusLabel.Text = "STARTING CAMERA..."
-        $statusLabel.ForeColor = [System.Drawing.Color]::Goldenrod
-
-        Start-NovaVideoCapture `
-            -DeviceName ([string]$videoCombo.SelectedItem) `
-            -OutputPath $script:currentVideoFile `
-            -Mode $selectedVideoMode `
-            -PreviewTarget $previewBox
-
-        Write-Host "Recording FFmpeg PID: $($script:videoProcess.Id)"
-        Write-Host "Recording FFmpeg HasExited: $($script:videoProcess.HasExited)"
-
-        # Wait until FFmpeg confirms that the camera is
-        # actually producing video frames.
-        $videoReadyDeadline = (Get-Date).AddSeconds(15)
-
-        while (
-            $null -ne $script:videoReadyMonitor -and
-            -not $script:videoReadyMonitor.VideoReady
-        ) {
-            Write-Host `
-                "Waiting for video ready... Ready=$($script:videoReadyMonitor.VideoReady) HasExited=$($script:videoProcess.HasExited)"
-
-            if ((Get-Date) -ge $videoReadyDeadline) {
-
-                $videoBytes = -1
-
-                if (Test-Path -LiteralPath $script:currentVideoFile) {
-                    $videoBytes =
-                        (Get-Item -LiteralPath $script:currentVideoFile).Length
-                }
-
-                Write-Host `
-                    "VIDEO TIMEOUT: Ready=$($script:videoReadyMonitor.VideoReady) HasExited=$($script:videoProcess.HasExited) VideoBytes=$videoBytes"
-
-                throw "Camera did not begin producing video within 15 seconds."
+        Start-NovaRecording `
+            -AudioDevice $device `
+            -GainDb ([double]$gainSlider.Value) `
+            -VideoEnabled ([bool]$videoCheckBox.Checked) `
+            -VideoDeviceName ([string]$videoCombo.SelectedItem) `
+            -VideoMode $videoModeCombo.SelectedItem `
+            -PreviewTarget $previewBox `
+            -PumpEvents { [System.Windows.Forms.Application]::DoEvents() } `
+            -OnCameraStarting {
+                $statusLabel.Text = "STARTING CAMERA..."
+                $statusLabel.ForeColor = [System.Drawing.Color]::Goldenrod
             }
-
-            if (
-                $null -ne $script:videoProcess -and
-                $script:videoProcess.HasExited
-            ) {
-                throw "FFmpeg exited while waiting for the camera to become ready."
-            }
-
-            [System.Windows.Forms.Application]::DoEvents()
-            Start-Sleep -Milliseconds 10
-        }
-
-        if (
-            $null -eq $script:videoReadyMonitor -or
-            -not $script:videoReadyMonitor.VideoReady
-        ) {
-            throw "Camera readiness could not be confirmed."
-        }
-    }
-
-    # Audio starts only after video is confirmed ready.
-    $script:recorder.Start(
-        $device.Id,
-        $script:currentFile
-    )
-}
-catch {
-
-    # If video started but anything after that failed,
-    # shut it down so RECORD remains atomic.
-    if ($script:videoRecording) {
-        try {
-            Stop-NovaVideoCapture
-        }
-        catch {
-        }
-    }
-
-    # Audio may also have partially started.
-    try {
-        $script:recorder.Stop()
     }
     catch {
-    }
+        [System.Windows.Forms.MessageBox]::Show(
+            $_.Exception.Message,
+            "Nova Recorder",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        )
 
-    [System.Windows.Forms.MessageBox]::Show(
-        $_.Exception.Message,
-        "Nova Recorder",
-        [System.Windows.Forms.MessageBoxButtons]::OK,
-        [System.Windows.Forms.MessageBoxIcon]::Error
-    )
+        $statusLabel.Text = "READY"
+        $statusLabel.ForeColor = [System.Drawing.Color]::LightGray
 
-    $statusLabel.Text = "READY"
-    $statusLabel.ForeColor = [System.Drawing.Color]::LightGray
-
-    if (
-        $videoCheckBox.Checked -and
-        $null -ne $videoCombo.SelectedItem -and
-        $null -ne $videoModeCombo.SelectedItem
-    ) {
-        try {
-            Start-NovaVideoPreview `
-                -DeviceName ([string]$videoCombo.SelectedItem) `
-                -Mode $videoModeCombo.SelectedItem `
-                -PreviewTarget $previewBox
+        if (
+            $videoCheckBox.Checked -and
+            $null -ne $videoCombo.SelectedItem -and
+            $null -ne $videoModeCombo.SelectedItem
+        ) {
+            try {
+                Start-NovaVideoPreview `
+                    -DeviceName ([string]$videoCombo.SelectedItem) `
+                    -Mode $videoModeCombo.SelectedItem `
+                    -PreviewTarget $previewBox
+            }
+            catch {
+                Write-Host "Camera preview restart after failed recording start failed: $($_.Exception.Message)"
+            }
         }
-        catch {
-            Write-Host "Camera preview restart after failed recording start failed: $($_.Exception.Message)"
-        }
+        return
     }
-
-    return
-}
 
 
     $script:recording = $true
