@@ -127,6 +127,8 @@ $script:workerAudioActive = $false
 $script:workerVideoActive = $false
 $script:sessionHasVideo = $false
 $script:workerState = 'OFFLINE'
+$script:workerExitRecoveryAllowed = $false
+$script:workerExitReason = ''
 $script:lastSessionPath = ''
 $script:bridgeCommandError = ''
 $script:cameraModesFor = ''
@@ -244,6 +246,62 @@ function Write-NovaBridgeRequest([string]$type, [hashtable]$parameters=@{}) {
     [System.IO.File]::Move($temp,$dest)
     return $script:bridgePingSeq
 }
+# WP-02B2B-I3B-I1-R3: worker-exit recovery must not infer capture safety
+# from process termination alone. Reject unreadable IPC, pending capture work,
+# incomplete sessions, and FFmpeg children owned by the exited worker.
+function Test-NovaExitedWorkerSafeToDetach {
+    $result = @{ safe=$false; reason='Worker-exit recovery unverified.' }
+    if ($null -eq $script:bridgeProcess -or -not $script:bridgeProcess.HasExited -or -not $script:bridgeDir) {
+        $result.reason = 'Worker is not confirmed exited.'
+        return $result
+    }
+    if ($script:pendingCaptureCommand -or $script:previewRequest -or $script:workerAudioActive -or
+        $script:workerVideoActive -or $script:workerState -in @('STARTING','RECORDING','STOPPING','FINALIZING')) {
+        $result.reason = 'Capture or camera command was unresolved at worker exit.'
+        return $result
+    }
+    $stateFile = Join-Path $script:bridgeDir 'state.json'
+    if (-not (Test-Path -LiteralPath $stateFile -PathType Leaf)) {
+        $result.reason = 'No last worker state is available.'
+        return $result
+    }
+    try {
+        $last = [System.IO.File]::ReadAllText($stateFile,[System.Text.Encoding]::UTF8) | ConvertFrom-Json
+    } catch {
+        $result.reason = 'Last worker state is unreadable.'
+        return $result
+    }
+    if ([string]$last.state -notin @('READY','ERROR','INITIALIZING') -or
+        [bool]$last.audioCaptureStarted -or [bool]$last.videoCaptureStarted -or [bool]$last.previewActive) {
+        $result.reason = 'Last worker state does not confirm idle capture.'
+        return $result
+    }
+    if ($last.outputSessionFolder -and
+        ([string]$last.state -ne 'READY' -or -not [bool]$last.finalizationOk)) {
+        $result.reason = 'Session output may be unfinished; inspect its files.'
+        return $result
+    }
+    # Do not accept a stale READY snapshot while a command is still queued.
+    if (Test-Path -LiteralPath (Join-Path $script:bridgeDir 'request.json')) {
+        $result.reason = 'A request remains queued in IPC.'
+        return $result
+    }
+    try {
+        $workerPid = [int]$script:bridgeProcess.Id
+        $children = @(Get-CimInstance -ClassName Win32_Process -Filter "ParentProcessId = $workerPid" -ErrorAction Stop |
+            Where-Object { $_.Name -ieq 'ffmpeg.exe' })
+        if ($children.Count -gt 0) {
+            $result.reason = 'Orphaned FFmpeg child detected; camera ownership unverified.'
+            return $result
+        }
+    } catch {
+        $result.reason = 'Cannot verify FFmpeg child processes; refusing recovery.'
+        return $result
+    }
+    $result.safe = $true
+    $result.reason = 'Exited worker verified idle; safe to disconnect. IPC evidence will be preserved.'
+    return $result
+}
 function Stop-NovaBridge {
     if ($null -eq $script:bridgeProcess) { return }
     # No force kill is permitted unless the last heartbeat proves idle.
@@ -252,7 +310,11 @@ function Stop-NovaBridge {
         throw 'Cannot disconnect: recording is active or command completion is unconfirmed.'
     }
     $process = $script:bridgeProcess
-    if (-not $process.HasExited) {
+    $unexpectedExit = $process.HasExited
+    if ($unexpectedExit) {
+        $recovery = Test-NovaExitedWorkerSafeToDetach
+        if (-not $recovery.safe) { throw ('Recovery refused: ' + $recovery.reason) }
+    } else {
         [void](Write-NovaBridgeRequest 'DISCONNECT')
         if (-not $process.WaitForExit(3500)) {
             throw 'Worker did not acknowledge disconnect. It was NOT terminated. Inspect state before retrying.'
@@ -260,12 +322,16 @@ function Stop-NovaBridge {
     }
     try { $process.Dispose() } catch {}
     $script:bridgeProcess = $null
-    if ($script:bridgeDir -and (Test-Path -LiteralPath $script:bridgeDir)) {
+    # Preserve IPC and final state for forensic inspection after unexpected exit.
+    if (-not $unexpectedExit -and $script:bridgeDir -and (Test-Path -LiteralPath $script:bridgeDir)) {
         Remove-Item -LiteralPath $script:bridgeDir -Recurse -Force -ErrorAction SilentlyContinue
     }
     $script:bridgeDir = $null
     $script:bridgeState = 'OFFLINE'
     $script:workerState = 'OFFLINE'
+    $script:workerExitRecoveryAllowed = $false
+    $script:workerExitReason = ''
+    $script:pendingCaptureCommand = ''
     $script:workerAudioActive = $false
     $ui.BridgeStatus.Text = 'Bridge offline'
     $ui.DisconnectBridgeButton.IsEnabled = $false
@@ -344,14 +410,18 @@ function Update-NovaBridge {
             } catch { $message += ' (unreadable state file)' }
         }
         $ui.ProbeStatus.Text = $message
-        $ui.BridgeStatus.Text = 'WORKER EXITED · INSPECT SESSION'
-        $ui.BridgeStatus.Foreground = $brushes.danger
+        $recovery = Test-NovaExitedWorkerSafeToDetach
+        $script:workerExitRecoveryAllowed = [bool]$recovery.safe
+        $script:workerExitReason = [string]$recovery.reason
+        $ui.BridgeStatus.Text = $(if ($recovery.safe) { 'WORKER EXITED · SAFE TO DISCONNECT' } else { 'WORKER EXITED · INSPECT SESSION' })
+        $ui.BridgeStatus.Foreground = $(if ($recovery.safe) { $brushes.warning } else { $brushes.danger })
         $ui.RecordButton.IsEnabled = $false
         $ui.StopButton.IsEnabled = $false
-        $ui.DisconnectBridgeButton.IsEnabled = $false
+        $ui.DisconnectBridgeButton.IsEnabled = [bool]$recovery.safe
         $ui.PingBridgeButton.IsEnabled = $false
         $script:workerState = 'ERROR'
-        $script:pendingCaptureCommand = ''
+        $ui.ProbeStatus.Text = $message + ' | ' + $recovery.reason
+        $ui.FooterStatus.Text = $(if ($recovery.safe) { 'SAFE IDLE EXIT · CLICK DISCONNECT TO RECOVER' } else { 'ABNORMAL EXIT · PRESERVE IPC AND SESSION FILES' })
         return
     }
     $stateFile = Join-Path $script:bridgeDir 'state.json'
@@ -519,6 +589,8 @@ $ui.ConnectBridgeButton.Add_Click({
         $script:bridgeLastHeartbeat = [DateTime]::MinValue
         $script:bridgeLastSequence = 0
         $script:workerState = 'INITIALIZING'
+        $script:workerExitRecoveryAllowed = $false
+        $script:workerExitReason = ''
         $script:cameraInventoryLoaded = $false
         $script:previewActive = $false
         $script:previewRequest = ''
@@ -790,8 +862,8 @@ $script:demoTimer.Add_Tick({
     }
 })
 
-# I2-R1 fail-closed rule: the X button is NEVER a controller disconnect.
-# An explicit DISCONNECT must first succeed (available only while READY).
+# R3 fail-closed rule: X never disconnects. After a verified idle worker exit,
+# DISCONNECT is available, and only that explicit action clears attachment.
 # This avoids relying on potentially stale UI state during active capture.
 $window.Add_Closing([System.ComponentModel.CancelEventHandler]{
     param($sender, $eventArgs)
