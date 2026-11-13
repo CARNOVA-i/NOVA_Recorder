@@ -33,7 +33,7 @@ $names = @(
     'SpectrumBars', 'LabWaveform', 'JawGlow', 'EyesGlow', 'HaloGlow', 'HeadSignalStatus', 'RmsPeakReadout',
     'EngineStatus', 'MicInventory', 'CameraInventory', 'ScanEngineButton', 'ProbeStatus',
     'ConnectBridgeButton', 'DisconnectBridgeButton', 'PingBridgeButton', 'BridgeStatus', 'MicrophoneSelector',
-    'CaptureVideoCheckBox', 'LiveCameraImage', 'CameraSelector', 'CameraModeSelector', 'StartPreviewButton', 'StopPreviewButton', 'CameraPreviewStatus', 'PreviewMetrics', 'VideoMonitorStatus'
+    'CaptureVideoCheckBox', 'MicMonitorCheckBox', 'MicMonitorStatus', 'LiveCameraImage', 'CameraSelector', 'CameraModeSelector', 'StartPreviewButton', 'StopPreviewButton', 'CameraPreviewStatus', 'PreviewMetrics', 'VideoMonitorStatus'
 )
 $ui = @{}
 foreach ($name in $names) {
@@ -76,6 +76,11 @@ $script:meterRenderLastUtc = [DateTime]::UtcNow
 $script:meterClipped = $false
 $script:meterActive = $false
 $script:meterLastUpdateUtc = [DateTime]::MinValue
+$script:monitorPendingSequence = 0
+$script:monitorPendingSinceUtc = [DateTime]::MinValue
+$script:monitorActive = $false
+$script:monitorDeviceId = -1
+$script:monitorLastError = ''
 $script:demoTimer = [System.Windows.Threading.DispatcherTimer]::new()
 $script:demoTimer.Interval = [TimeSpan]::FromMilliseconds(85)
 
@@ -254,6 +259,33 @@ function Write-NovaBridgeRequest([string]$type, [hashtable]$parameters=@{}) {
     [System.IO.File]::Move($temp,$dest)
     return $script:bridgePingSeq
 }
+# Reconcile monitor state with the worker only while idle; no polling-side effects
+# while recording, finalizing, camera commands, or outstanding IPC requests.
+function Sync-NovaMicMonitor([object]$state) {
+    if ($script:monitorPendingSequence -gt 0) { return }
+    if ($script:workerState -ne 'READY' -or $script:pendingCaptureCommand -or $script:previewRequest) { return }
+    if ($null -eq $ui.MicrophoneSelector.SelectedItem) { return }
+    $desired = ($ui.MicMonitorCheckBox.IsChecked -eq $true)
+    $deviceId = [int]$ui.MicrophoneSelector.SelectedItem.Id
+    $active = [bool]$state.monitorActive
+    $enabled = [bool]$state.monitorEnabled
+    $currentId = [int]$state.monitorDeviceId
+    if (($desired -eq $enabled) -and ((-not $desired) -or ($currentId -eq $deviceId))) {
+        # If monitor start failed, don't continuously retry at 10 Hz.
+        return
+    }
+    try {
+        $seq = Write-NovaBridgeRequest 'SET_MONITOR' @{
+            enabled=$desired; deviceId=$deviceId; gainDb=[double]$ui.GainSlider.Value
+        }
+        $script:monitorPendingSequence = $seq
+        $script:monitorPendingSinceUtc = [DateTime]::UtcNow
+        $ui.MicMonitorStatus.Text = 'Changing monitor state...'
+    } catch {
+        $ui.MicMonitorStatus.Text = 'Monitor request deferred: ' + $_.Exception.Message
+    }
+}
+
 # WP-02B2B-I3B-I1-R3: worker-exit recovery must not infer capture safety
 # from process termination alone. Reject unreadable IPC, pending capture work,
 # incomplete sessions, and FFmpeg children owned by the exited worker.
@@ -341,6 +373,9 @@ function Stop-NovaBridge {
     $script:workerExitReason = ''
     $script:pendingCaptureCommand = ''
     $script:workerAudioActive = $false
+    $script:monitorActive = $false
+    $script:monitorPendingSequence = 0
+    $ui.MicMonitorStatus.Text = 'Disconnected · microphone released'
     $ui.BridgeStatus.Text = 'Bridge offline'
     $ui.DisconnectBridgeButton.IsEnabled = $false
     $ui.PingBridgeButton.IsEnabled = $false
@@ -442,6 +477,10 @@ function Update-NovaBridge {
             $script:bridgeLastHeartbeat = [datetime]::Parse([string]$state.utc).ToUniversalTime()
             $script:workerState = [string]$state.state
             $script:workerAudioActive = [bool]$state.audioCaptureStarted
+            $script:monitorActive = [bool]$state.monitorActive
+            $script:monitorDeviceId = [int]$state.monitorDeviceId
+            $script:monitorLastError = [string]$state.monitorError
+            if ($script:monitorPendingSequence -gt 0 -and [int]$state.lastRequestSequence -ge $script:monitorPendingSequence) { $script:monitorPendingSequence = 0 }
             # Actual peak and clipping arrive with the worker heartbeat.
             # Treat missing/stale values as no signal, never as demo audio.
             $script:meterPeakDbfs = [Math]::Max(-96.0,[Math]::Min(0.0,[double]$state.meterPeakDbfs))
@@ -501,6 +540,9 @@ function Update-NovaBridge {
                 $ui.CameraPreviewStatus.Text = 'Preview diagnostic: ' + [string]$state.previewError
             }
             $script:bridgeState = $script:workerState
+            $ui.MicMonitorCheckBox.IsEnabled = ($script:workerState -eq 'READY' -and -not $script:pendingCaptureCommand)
+            $ui.MicMonitorStatus.Text = if ($script:monitorLastError) { $script:monitorLastError } elseif ($script:monitorActive) { '● LIVE MIC · NO AUDIO FILE' } elseif ($script:workerState -eq 'RECORDING') { '● RECORDING INPUT' } elseif ($ui.MicMonitorCheckBox.IsChecked -eq $true) { 'Monitor waiting for microphone' } else { 'Monitor OFF' }
+            Sync-NovaMicMonitor $state
             $captureAckComplete = $false
             if ($script:pendingCaptureCommand -and [int]$state.lastRequestSequence -eq $script:pendingCaptureSequence) {
                 $commandFailed = ([string]$state.lastCommand -eq 'COMMAND FAILED' -or $script:workerState -eq 'ERROR')
@@ -613,6 +655,9 @@ $ui.ConnectBridgeButton.Add_Click({
         $ui.LiveCameraImage.Source = $null
         $ui.LiveCameraImage.Visibility = [System.Windows.Visibility]::Collapsed
         $script:workerAudioActive = $false
+        $script:monitorPendingSequence = 0
+        $script:monitorActive = $false
+        $ui.MicMonitorStatus.Text = 'Waiting for selected microphone...'
         $script:workerVideoActive = $false
         $script:sessionHasVideo = $false
         $ui.CaptureVideoCheckBox.IsChecked = $false
@@ -635,6 +680,8 @@ $ui.DisconnectBridgeButton.Add_Click({
 $ui.MicrophoneSelector.Add_SelectionChanged({
     if ($script:workerState -eq 'READY') { Update-NovaRecordingTransport 'READY' }
 })
+$ui.MicMonitorCheckBox.Add_Checked({ $ui.MicMonitorStatus.Text = 'Monitoring requested · select microphone' })
+$ui.MicMonitorCheckBox.Add_Unchecked({ $ui.MicMonitorStatus.Text = 'Monitoring OFF requested' })
 $ui.PingBridgeButton.Add_Click({
     if ($script:bridgeState -ne 'READY') { return }
     try {
@@ -748,6 +795,7 @@ $script:previewRenderTimer.Add_Tick({
 
 $ui.RecordButton.Add_Click({
     if ($script:workerState -ne 'READY' -or $script:pendingCaptureCommand -or $script:previewRequest) { return }
+    if ($script:monitorPendingSequence -gt 0) { $ui.ProbeStatus.Text = 'Wait for microphone monitor transition to finish.'; return }
     if ($null -eq $ui.MicrophoneSelector.SelectedItem) {
         $ui.ProbeStatus.Text = 'Select the microphone explicitly before recording.'
         return
@@ -829,7 +877,7 @@ $script:demoTimer.Add_Tick({
     $dt = [Math]::Max(0.001,[Math]::Min(0.25,($now - $script:meterRenderLastUtc).TotalSeconds))
     $script:meterRenderLastUtc = $now
     $meterFresh = ($now - $script:meterLastUpdateUtc).TotalSeconds -lt 0.7
-    $meterActive = ($script:workerState -eq 'RECORDING' -and $script:meterActive -and $meterFresh)
+    $meterActive = ($script:workerState -in @('READY','RECORDING') -and $script:meterActive -and $meterFresh)
     $targetDbfs = if ($meterActive) { [double]$script:meterPeakDbfs } else { -60.0 }
     # Fast attack, slower release. Time-based response remains stable if UI stalls.
     $tau = if ($targetDbfs -gt $script:meterDisplayDbfs) { 0.035 } else { 0.34 }
@@ -878,7 +926,7 @@ $script:demoTimer.Add_Tick({
     $ui.EyesGlow.Opacity = 0.15 + 0.85 * $intensity
     $ui.HaloGlow.Opacity = 0.12 + 0.82 * $intensity
     # RMS is not provided by NovaWaveRecorder; do not fabricate one.
-    $ui.RmsPeakReadout.Text = if ($meterActive) { 'LIVE PEAK {0:N1} dBFS' -f $dbfs } else { 'METER IDLE · RECORD TO MONITOR' }
+    $ui.RmsPeakReadout.Text = if ($meterActive) { 'LIVE PEAK {0:N1} dBFS' -f $dbfs } else { 'METER IDLE · ENABLE MIC MONITOR' }
     $ui.PeakReadout.Text = if ($meterActive -and $script:meterPeakDbfs -gt -96.0) { 'LIVE PEAK {0:N1} dBFS' -f $dbfs } elseif ($meterActive) { 'LIVE PEAK −∞ dBFS' } else { 'MIC METER IDLE' }
     if ($meterActive -and $script:meterClipped) { $script:clipHold = 8 }
     if (-not $meterActive) { $script:clipHold = 0 }

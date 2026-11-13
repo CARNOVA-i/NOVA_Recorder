@@ -43,6 +43,10 @@ $script:outputMp4 = ''
 $script:videoReady = $false
 $script:videoCaptureError = ''
 $script:cameraStartupStage = ''
+$script:monitorEnabled = $false # Explicit UI intent only; no capture on worker launch.
+$script:monitorDeviceId = -1
+$script:monitorGainDb = 0.0
+$script:monitorError = ''
 
 function Publish-State {
     $script:sequence++
@@ -58,9 +62,13 @@ function Publish-State {
         audioCaptureStarted=[bool]$script:recorder.IsRecording
         # High-resolution, post-gain sample peak from the existing recording callback.
         # GetPeakDbfs atomically consumes the interval maximum; no second capture.
-        meterPeakDbfs=$(if ($script:recorder.IsRecording) { [double]$script:recorder.GetPeakDbfs() } else { -96.0 })
-        meterClipped=$(if ($script:recorder.IsRecording) { [bool]$script:recorder.GetAndResetClipping() } else { $false })
-        meterActive=[bool]$script:recorder.IsRecording
+        meterPeakDbfs=$(if ($script:recorder.IsRecording -or $script:recorder.IsPreviewing) { [double]$script:recorder.GetPeakDbfs() } else { -96.0 })
+        meterClipped=$(if ($script:recorder.IsRecording -or $script:recorder.IsPreviewing) { [bool]$script:recorder.GetAndResetClipping() } else { $false })
+        meterActive=[bool]($script:recorder.IsRecording -or $script:recorder.IsPreviewing)
+        monitorActive=[bool]$script:recorder.IsPreviewing
+        monitorEnabled=[bool]$script:monitorEnabled
+        monitorDeviceId=[int]$script:monitorDeviceId
+        monitorError=[string]$script:monitorError
         videoCaptureStarted=[bool]$script:videoRecording
         videoReady=[bool]$script:videoReady
         cameraStartupStage=$script:cameraStartupStage
@@ -229,8 +237,8 @@ function Start-StudioCameraPreview([object]$request, [bool]$InternalAvPreflight 
     $allowedState = ($script:state -eq 'READY') -or
         ($InternalAvPreflight -and $script:state -eq 'STARTING')
     if (-not $allowedState -or $script:recorder.IsRecording -or
-        $script:recorder.IsPreviewing -or $script:recording -or $script:videoRecording) {
-        throw 'Preview requires idle audio recorder and an authorized controller state.'
+        $script:recording -or $script:videoRecording) {
+        throw 'Camera preview requires no recording and an authorized controller state.'
     }
     if ($null -ne $script:previewProcess) { throw 'Camera preview already started.' }
     if (-not $script:ffmpegAvailable) { throw 'Portable FFmpeg is unavailable.' }
@@ -374,6 +382,7 @@ function Start-NovaAvSession([object]$request) {
     $modes = @($script:cameraModes | Where-Object { $_.Key -eq $key })
     if ($modes.Count -ne 1) { throw 'Choose a valid MJPEG camera mode.' }
     $mode = $modes[0]
+    Stop-StudioMicMonitor # Stop WinMM preview before video-readiness gate.
     $script:state = 'STARTING'
     $script:recordingError = ''
     $script:errorMessage = ''
@@ -494,11 +503,64 @@ function Stop-NovaAvSession {
         $script:errorMessage = ''
         $script:recordingStartedUtc = ''
         $script:state = 'READY'
+        Resume-StudioMicMonitor
     } catch {
         $script:recordingError = $_.Exception.ToString()
         $script:errorMessage = $script:recordingError
         $script:state = 'ERROR'
         throw
+    }
+}
+
+# WP-02C-I2: One native WinMM microphone owner per worker. Preview never writes WAV.
+function Stop-StudioMicMonitor {
+    if ($script:recorder.IsPreviewing) { $script:recorder.StopPreview() }
+}
+function Start-StudioMicMonitor {
+    if (-not $script:monitorEnabled -or $script:monitorDeviceId -lt 0) { return }
+    if ($script:state -ne 'READY' -or $script:recorder.IsRecording -or $script:recording) { return }
+    try {
+        $script:recorder.SetGainDb($script:monitorGainDb)
+        if (-not $script:recorder.IsPreviewing) {
+            $script:recorder.StartPreview($script:monitorDeviceId)
+        }
+        $script:monitorError = ''
+    } catch {
+        $script:monitorError = 'Microphone monitor could not start: ' + $_.Exception.Message
+        # Keep recording transport usable; a monitor failure isn't a recording failure.
+        try { Stop-StudioMicMonitor } catch {}
+    }
+}
+function Set-StudioMicMonitor([object]$request) {
+    if ($script:state -ne 'READY' -or $script:recording -or $script:recorder.IsRecording) {
+        throw 'Microphone monitor can only change while READY.'
+    }
+    Stop-StudioMicMonitor
+    $script:monitorEnabled = [bool]$request.enabled
+    $script:monitorDeviceId = -1
+    $script:monitorError = ''
+    if (-not $script:monitorEnabled) { return }
+    $id = [int]$request.deviceId
+    $devices = @($script:audioDevices | Where-Object { $_.Id -eq $id })
+    if ($devices.Count -ne 1) {
+        $script:monitorEnabled = $false
+        $script:monitorError = 'Selected monitor microphone is unavailable.'
+        return
+    }
+    $gain = [double]$request.gainDb
+    if ([double]::IsNaN($gain) -or $gain -lt 0 -or $gain -gt 18) {
+        $script:monitorEnabled = $false
+        $script:monitorError = 'Monitor gain outside 0 to +18 dB.'
+        return
+    }
+    $script:monitorDeviceId = $id
+    $script:monitorGainDb = $gain
+    Start-StudioMicMonitor
+}
+function Resume-StudioMicMonitor {
+    # A failure to reopen the idle monitor must never fail a finalized WAV/MP4.
+    if ($script:state -eq 'READY' -and $script:monitorEnabled) {
+        Start-StudioMicMonitor
     }
 }
 
@@ -516,6 +578,7 @@ function Start-NovaAudioSession([object]$request) {
     if ([double]::IsNaN($gain) -or $gain -lt 0 -or $gain -gt 18) {
         throw 'Gain must be between 0 and +18 dB.'
     }
+    Stop-StudioMicMonitor # Recording will exclusively own the same native recorder.
     $script:state = 'STARTING'
     $script:recordingError = ''
     $script:finalizationOk = $false
@@ -575,6 +638,7 @@ function Stop-NovaAudioSession {
         $script:errorMessage = ''
         $script:recordingStartedUtc = ''
         $script:state = 'READY'
+        Resume-StudioMicMonitor
     } catch {
         $script:recordingError = $_.Exception.ToString()
         $script:errorMessage = $script:recordingError
@@ -623,6 +687,10 @@ try {
                     'START_PREVIEW' { $lastCommand='START_PREVIEW'; Start-StudioCameraPreview $request }
                     'STOP_PREVIEW' { $lastCommand='STOP_PREVIEW'; Stop-StudioCameraPreview }
                     'PING' { $lastCommand = 'PONG' }
+                    'SET_MONITOR' {
+                        $lastCommand = 'SET_MONITOR'
+                        try { Set-StudioMicMonitor $request } catch { $script:monitorError = $_.Exception.Message }
+                    }
                     'START_AUDIO' {
                         $lastCommand = 'START_AUDIO'
                         Start-NovaAudioSession $request
@@ -677,6 +745,7 @@ try {
     }
 } finally {
     try { Stop-StudioCameraPreview } catch {}
+    try { Stop-StudioMicMonitor } catch {}
     Recover-NovaActiveRecording
     if ($null -ne $script:recorder) {
         # Dispose only after attempting an orderly finalization.
