@@ -56,6 +56,11 @@ function Publish-State {
         ffmpegAvailable=$script:ffmpegAvailable
         captureEnabled=$true
         audioCaptureStarted=[bool]$script:recorder.IsRecording
+        # High-resolution, post-gain sample peak from the existing recording callback.
+        # GetPeakDbfs atomically consumes the interval maximum; no second capture.
+        meterPeakDbfs=$(if ($script:recorder.IsRecording) { [double]$script:recorder.GetPeakDbfs() } else { -96.0 })
+        meterClipped=$(if ($script:recorder.IsRecording) { [bool]$script:recorder.GetAndResetClipping() } else { $false })
+        meterActive=[bool]$script:recorder.IsRecording
         videoCaptureStarted=[bool]$script:videoRecording
         videoReady=[bool]$script:videoReady
         cameraStartupStage=$script:cameraStartupStage
@@ -111,7 +116,7 @@ try {
     # existing native module; no controls, preview streams, or capture devices open.
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
-    . (Join-Path $EngineRoot 'Engine\NovaNative.ps1')
+    . (Join-Path $PSScriptRoot 'Load-NovaMeterNative.ps1') -EngineRoot $EngineRoot
     if (-not ('NovaWaveRecorder' -as [type])) {
         throw 'Native NovaWaveRecorder type was not compiled.'
     }
@@ -599,7 +604,8 @@ function Recover-NovaActiveRecording {
 
 try {
     while ($true) {
-        Start-Sleep -Milliseconds 350
+        # 10 Hz status/meter publication; capture callback and UI remain separate.
+        Start-Sleep -Milliseconds 100
         if (-not (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue)) {
             Recover-NovaActiveRecording
             break

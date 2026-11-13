@@ -68,6 +68,14 @@ $script:tickCount = 0
 $script:generator = [Random]::new()
 $script:clipHold = 0
 $script:peakHold = -48.0
+$script:meterPeakDbfs = -96.0
+$script:meterDisplayDbfs = -60.0
+$script:meterPeakHoldDbfs = -60.0
+$script:meterHoldUntilUtc = [DateTime]::MinValue
+$script:meterRenderLastUtc = [DateTime]::UtcNow
+$script:meterClipped = $false
+$script:meterActive = $false
+$script:meterLastUpdateUtc = [DateTime]::MinValue
 $script:demoTimer = [System.Windows.Threading.DispatcherTimer]::new()
 $script:demoTimer.Interval = [TimeSpan]::FromMilliseconds(85)
 
@@ -434,6 +442,12 @@ function Update-NovaBridge {
             $script:bridgeLastHeartbeat = [datetime]::Parse([string]$state.utc).ToUniversalTime()
             $script:workerState = [string]$state.state
             $script:workerAudioActive = [bool]$state.audioCaptureStarted
+            # Actual peak and clipping arrive with the worker heartbeat.
+            # Treat missing/stale values as no signal, never as demo audio.
+            $script:meterPeakDbfs = [Math]::Max(-96.0,[Math]::Min(0.0,[double]$state.meterPeakDbfs))
+            $script:meterClipped = [bool]$state.meterClipped
+            $script:meterActive = [bool]$state.meterActive
+            $script:meterLastUpdateUtc = [DateTime]::UtcNow
             $script:workerVideoActive = [bool]$state.videoCaptureStarted
             $script:sessionHasVideo = [bool]$state.activeSessionHasVideo
             if ($script:workerState -eq 'INITIALIZING') {
@@ -509,13 +523,13 @@ function Update-NovaBridge {
                     $ui.LiveCameraImage.Source = $null
                     $ui.LiveCameraImage.Visibility = [System.Windows.Visibility]::Collapsed
                 } elseif ($completed -eq 'START_AV' -and $script:workerState -eq 'RECORDING') {
-                    $ui.FooterStatus.Text = 'REAL A/V RECORDING · METERS DEMO · ' + [string]$state.outputAvi
+                    $ui.FooterStatus.Text = 'REAL A/V RECORDING · NATIVE PEAK METER · ' + [string]$state.outputAvi
                 } elseif ($completed -eq 'STOP_AUDIO' -and $state.finalizationOk -and $script:workerState -eq 'READY') {
                     $script:lastSessionPath = [string]$state.outputSessionFolder
                     $ui.FooterStatus.Text = 'WAV VERIFIED · ' + [string]$state.outputWav
                     $ui.ProbeStatus.Text = 'WAV finalized: ' + [string]$state.outputWav
                 } elseif ($completed -eq 'START_AUDIO' -and $script:workerState -eq 'RECORDING') {
-                    $ui.FooterStatus.Text = 'REAL AUDIO RECORDING · METERS DEMO · ' + [string]$state.outputWav
+                    $ui.FooterStatus.Text = 'REAL AUDIO RECORDING · NATIVE PEAK METER · ' + [string]$state.outputWav
                 }
             }
             if ([string]$state.recordingStartedUtc) {
@@ -806,15 +820,36 @@ for ($i = 0; $i -lt 40; $i++) {
 $script:demoTimer.Add_Tick({
     Complete-NovaEngineProbe
     $script:bridgePollTicks++
-    if ($script:bridgePollTicks % 6 -eq 0) { Update-NovaBridge }
+    if ($script:bridgePollTicks % 2 -eq 0) { Update-NovaBridge }
     # Camera preview has its own ~25 Hz timer; do not couple frame rendering to demo tick.
     $script:tickCount++
-    $beat = 0.25 + 0.45 * [Math]::Abs([Math]::Sin($script:tickCount * 0.13))
-    $noise = $script:generator.NextDouble() * 0.32
-    $intensity = [Math]::Min(1, $beat + $noise)
-    $threshold = [int][Math]::Floor($intensity * 36)
+    # The actual native WinMM recorder is the ONLY source of the level gauge.
+    # During idle, startup, worker loss or stale IPC it reads inactive.
+    $now = [DateTime]::UtcNow
+    $dt = [Math]::Max(0.001,[Math]::Min(0.25,($now - $script:meterRenderLastUtc).TotalSeconds))
+    $script:meterRenderLastUtc = $now
+    $meterFresh = ($now - $script:meterLastUpdateUtc).TotalSeconds -lt 0.7
+    $meterActive = ($script:workerState -eq 'RECORDING' -and $script:meterActive -and $meterFresh)
+    $targetDbfs = if ($meterActive) { [double]$script:meterPeakDbfs } else { -60.0 }
+    # Fast attack, slower release. Time-based response remains stable if UI stalls.
+    $tau = if ($targetDbfs -gt $script:meterDisplayDbfs) { 0.035 } else { 0.34 }
+    $weight = 1.0 - [Math]::Exp(-$dt / $tau)
+    $script:meterDisplayDbfs += ($targetDbfs - $script:meterDisplayDbfs) * $weight
+    if (-not $meterActive) {
+        $script:meterDisplayDbfs = [Math]::Max(-60.0,$script:meterDisplayDbfs)
+        $script:meterPeakHoldDbfs = -60.0
+        $script:meterHoldUntilUtc = [DateTime]::MinValue
+    } elseif ($script:meterDisplayDbfs -ge $script:meterPeakHoldDbfs -or $now -ge $script:meterHoldUntilUtc) {
+        $script:meterPeakHoldDbfs = $script:meterDisplayDbfs
+        $script:meterHoldUntilUtc = $now.AddMilliseconds(480)
+    }
+    $dbfs = [Math]::Max(-96.0,[Math]::Min(0.0,$script:meterDisplayDbfs))
+    $intensity = if ($meterActive) { [Math]::Max(0.0,[Math]::Min(1.0,($dbfs + 60.0) / 60.0)) } else { 0.0 }
+    $threshold = if ($meterActive) { [int][Math]::Ceiling($intensity*36) } else { 0 }
+    $holdBar = if ($meterActive) { [int][Math]::Ceiling([Math]::Max(0.0,($script:meterPeakHoldDbfs+60.0)/60.0)*36)-1 } else { -1 }
+    $threshold = [Math]::Max(0,[Math]::Min(36,$threshold))
     for ($i=0; $i -lt $bars.Count; $i++) {
-        $bars[$i].Opacity = if ($i -lt $threshold) { 0.95 } else { 0.13 }
+        $bars[$i].Opacity = if ($i -lt $threshold) { 0.95 } elseif ($i -eq $holdBar) { 0.75 } else { 0.13 }
     }
     $points = [System.Windows.Media.PointCollection]::new()
     for ($i=0; $i -le 110; $i++) {
@@ -839,23 +874,24 @@ $script:demoTimer.Add_Tick({
         $variation = 0.32 + 0.68 * [Math]::Abs([Math]::Sin($i * 0.5 + $script:tickCount * 0.08))
         $spectrum[$i].Height = 8 + 66 * $region * $variation
     }
-    $ui.JawGlow.Opacity = 0.15 + 0.85 * $bass
-    $ui.EyesGlow.Opacity = 0.15 + 0.85 * $mids
-    $ui.HaloGlow.Opacity = 0.12 + 0.82 * $treble
-    $ui.RmsPeakReadout.Text = 'RMS {0:N0} / PEAK {1:N0}' -f (-34 + 22 * $intensity), (-42 + 41*$intensity)
-    $ui.PeakReadout.Text = 'DEMO PEAK  {0:N1} dBFS' -f (-42 + $intensity*41)
-    $clip = $intensity -gt 0.96
-    if ($clip) { $script:clipHold = 6 }
+    $ui.JawGlow.Opacity = 0.15 + 0.85 * $intensity
+    $ui.EyesGlow.Opacity = 0.15 + 0.85 * $intensity
+    $ui.HaloGlow.Opacity = 0.12 + 0.82 * $intensity
+    # RMS is not provided by NovaWaveRecorder; do not fabricate one.
+    $ui.RmsPeakReadout.Text = if ($meterActive) { 'LIVE PEAK {0:N1} dBFS' -f $dbfs } else { 'METER IDLE · RECORD TO MONITOR' }
+    $ui.PeakReadout.Text = if ($meterActive -and $script:meterPeakDbfs -gt -96.0) { 'LIVE PEAK {0:N1} dBFS' -f $dbfs } elseif ($meterActive) { 'LIVE PEAK −∞ dBFS' } else { 'MIC METER IDLE' }
+    if ($meterActive -and $script:meterClipped) { $script:clipHold = 8 }
+    if (-not $meterActive) { $script:clipHold = 0 }
     if ($script:clipHold -gt 0) { $script:clipHold-- }
-    $ui.ClipReadout.Text = if ($script:clipHold -gt 0) { '● DEMO CLIP' } else { 'NO CLIP' }
+    $ui.ClipReadout.Text = if (-not $meterActive) { 'NO INPUT' } elseif ($script:clipHold -gt 0) { '● CLIP' } else { 'NO CLIP' }
     $ui.ClipReadout.Foreground = if ($script:clipHold -gt 0) { $brushes.danger } else { $brushes.healthy }
     $headBrush = if ($script:clipHold -gt 0) { $brushes.headClip } elseif ($intensity -gt 0.7) { $brushes.headLoud } else { $brushes.head }
     $ui.CompactHeadOutline.Fill = $headBrush
     $ui.LargeHeadOutline.Fill = $headBrush
-    $ui.CompactGlow.Opacity = 0.25 + $intensity * 0.75
-    $ui.LargeGlow.Opacity = 0.25 + $intensity * 0.75
-    $ui.HeadSignalStatus.Text = if ($script:clipHold -gt 0) { '● DEMO CLIP' } else { '● HEALTHY' }
-    $ui.HeadSignalStatus.Foreground = if ($script:clipHold -gt 0) { $brushes.danger } else { $brushes.healthy }
+    $ui.CompactGlow.Opacity = 0.15 + $intensity * 0.85
+    $ui.LargeGlow.Opacity = 0.15 + $intensity * 0.85
+    $ui.HeadSignalStatus.Text = if (-not $meterActive) { '● IDLE' } elseif ($script:clipHold -gt 0) { '● CLIP' } else { '● LIVE INPUT' }
+    $ui.HeadSignalStatus.Foreground = if ($script:clipHold -gt 0) { $brushes.danger } elseif ($meterActive) { $brushes.healthy } else { $brushes.warning }
     if ($script:workerState -eq 'RECORDING' -and $script:realRecordingStartedUtc -ne [DateTime]::MinValue) {
         $elapsed = [DateTime]::UtcNow - $script:realRecordingStartedUtc
         $ui.ElapsedText.Text = '{0:00}:{1:00}:{2:00}' -f [Math]::Floor($elapsed.TotalHours), $elapsed.Minutes, $elapsed.Seconds
